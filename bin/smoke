@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+curl -s -X POST http://localhost:3000/api/generate \
+  -H "Content-Type: application/json" \
+  -d @"$DIR/sample.json" | jq

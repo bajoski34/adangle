@@ -1,0 +1,5 @@
+#!/bin/bash
+
+curl -s -X POST http://localhost:3000/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://www.ramp.com"}' | jq
