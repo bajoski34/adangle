@@ -29,16 +29,25 @@ pnpm dev
 | `LLM_FALLBACK_MODELS` | no | `gemini-2.5-flash-lite,gemini-3-flash-preview,gemini-3.1-flash-lite-preview` | Comma-separated throttle-fallback chain (see below) |
 
 ```bash
+pnpm test       # 53 unit tests (LLM retry/fallback logic, CSV format, scrape chain) — no API keys needed
 bin/test        # smoke-test /api/analyze against ramp.com
 bin/smoke       # smoke-test /api/generate with a canned brief
 ```
 
-## What it does
+## What does it do?
 
 1. **Analyze** — scrape the page and extract the persuasion brief: offer, audience, primary hook, pain points, proof elements, CTA and its placement, the dominant **emotional angle** (rendered on a dial: fear → urgency → value → trust → curiosity → aspiration), and up to five conversion weaknesses a buyer should fix before spending traffic on the page.
 2. **Ship** — generate the campaign kit: 8–15 RSA headlines (≤30 chars) and 3–4 descriptions (≤90), 3–5 Meta variants each attacking a different angle (shown as they'd render in-feed), TikTok spoken hooks, Taboola native headlines, a prioritized A/B test plan, and effort-rated landing page fixes. Every line has a live character meter, one-click copy, and a **rewrite button with a tone selector** (punchier / more concrete / more urgent / softer) that regenerates just that line, on-brief.
 3. **Compare** — analyze a competitor's page and get the asymmetries: angle gaps (claims they make that you don't), proof gaps, open positions they can't credibly contest, and ready-to-run counter-angles with example hooks.
 4. **Export** — download the Google copy as an **Ads Editor bulk-import CSV** (one responsive search ad, `Status: Paused` so an import never spends money by accident), or copy any tab as plain text.
+
+## Why did we build THIS one?
+
+"LLM writes your ads" is the most crowded wrapper category there is — and almost every entry in it starts at the wrong end. Copy is the *last* step of a media buyer's job. The first step is the argument: what is this page actually selling, to whom, on which emotional lever, and where does the pitch leak? Skip that and you get fluent, generic copy that tests like it. So AdAngle makes the **persuasion brief a first-class artifact**: the analysis is the product, the copy is its output, and every generated line traces back to a named pain point, proof element, or weakness. It's also why competitor comparison was worth building — angles only matter relative to what the ad auction's other bidders are claiming.
+
+The second reason is that the workflow details are where tools earn trust, and they're cheap to get right if you respect them: character limits enforced as hard constraints (with a violation-fed retry, not hope), a CSV that imports into Ads Editor *paused*, Meta copy cut to truncation-safe lengths, TikTok hooks written to be spoken not read. None of that is AI. All of it is the difference between a demo and a tool.
+
+And third: under the hood this is a genuinely interesting engineering slice — hostile, arbitrary web pages in; strictly-typed, length-constrained structured output out; running on free-tier infrastructure that rate-limits by the day. Every layer of the pipeline (scrape → vision fallback → JSON defense → quota-aware model chain) exists because something real broke without it. The engineering notes below are the receipts.
 
 ## How it works
 
@@ -86,9 +95,11 @@ URL ──► scrape (Firecrawl markdown)
 - **Taboola's 60-char headline ceiling** is a best-practice figure; verify against the current spec before a real buy.
 - **No persistence** — reports live in the page. Refresh and re-analyze (scrape + LLM caches make repeats cheap).
 
-## What's next
+## What would we build next (if this were the full-time job)?
 
-The generated copy is a hypothesis; the ad account is the experiment. The roadmap is an **MCP server exposing AdAngle's pipeline as tools** (`analyze_page`, `generate_kit`, `compare_competitors`) plus live **Meta and Google Ads API connectors** — push a paused campaign directly from the kit, then pull real CTR/CPA back per angle, so the A/B plan grades its own homework and the next generation round is briefed on what actually converted. That closes the loop this tool is pointed at: from "here's copy that should work" to "here's the angle that *did*."
+The generated copy is a hypothesis; the ad account is the experiment. The headline bet is an **MCP server exposing AdAngle's pipeline as tools** (`analyze_page`, `generate_kit`, `compare_competitors`) plus live **Meta and Google Ads API connectors** — push a paused campaign directly from the kit, then pull real CTR/CPA back per angle, so the A/B plan grades its own homework and the next generation round is briefed on what actually converted. That closes the loop this tool is pointed at: from "here's copy that should work" to "here's the angle that *did*."
+
+On the way there, in order: saved reports with re-analysis diffing (watch a competitor's angle shift week over week), brand-voice constraints fed into every generation, and funnel-aware analysis (paste the whole click path — ad → LP → checkout — and find where the argument breaks between steps).
 
 ## Stack
 
