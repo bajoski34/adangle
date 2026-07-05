@@ -10,6 +10,9 @@ export const PageBrief = z.object({
   proofElements: z.array(z.string()),
   cta: z.object({ text: z.string(), placement: z.string() }),
   emotionalAngle: z.enum(["fear", "aspiration", "urgency", "trust", "curiosity", "value"]),
+  // The page element that justifies the emotionalAngle call. Optional so briefs
+  // cached before this field existed still parse.
+  angleEvidence: z.string().optional(),
   weaknesses: z.array(z.string()).max(5),
 });
 export type PageBrief = z.infer<typeof PageBrief>;

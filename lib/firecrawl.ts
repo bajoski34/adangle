@@ -1,12 +1,38 @@
 import type { ScrapeResult } from "./schemas";
 import { cached, cacheKey } from "./cache";
+import { checkPublicUrl } from "./url-guard";
+
+// Landing pages change rarely; scrape results are cached for days so repeat
+// analyses of the same URL (demos, shared links, compare flows) never re-bill.
+const SCRAPE_TTL = 7 * 24 * 60 * 60 * 1000;
+
+// Frugal mode (the default) tries the free direct fetch first and only spends
+// a Firecrawl credit when the page fails or returns too little text to brief
+// (JS-rendered shells, bot walls). Set SCRAPE_MODE=quality to always lead with
+// Firecrawl's cleaner markdown — e.g. for demo day.
+function frugalMode(): boolean {
+  return process.env.SCRAPE_MODE !== "quality";
+}
+
+// Below this many characters of stripped text, assume the free fetch got a
+// shell page and let Firecrawl render it properly.
+const THIN_TEXT = 600;
 
 export async function scrapePage(url: string): Promise<ScrapeResult> {
-  const key = cacheKey("firecrawl", url);
-  return cached(key, 60_000, () => scrapePageImpl(url));
+  const key = cacheKey("scrape", frugalMode() ? "frugal" : "quality", url);
+  return cached(key, SCRAPE_TTL, () => scrapePageImpl(url));
 }
 
 async function scrapePageImpl(url: string): Promise<ScrapeResult> {
+  if (frugalMode()) {
+    const free = await fallbackScrape(url);
+    if (free.ok && free.markdown.length >= THIN_TEXT) return free;
+    return (await firecrawlScrape(url)) ?? free;
+  }
+  return (await firecrawlScrape(url)) ?? fallbackScrape(url);
+}
+
+async function firecrawlScrape(url: string): Promise<ScrapeResult | null> {
   try {
     const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
@@ -23,8 +49,8 @@ async function scrapePageImpl(url: string): Promise<ScrapeResult> {
         return { ok: true, markdown: json.data.markdown.slice(0, 40_000), title: json.data.metadata?.title ?? url, source: "firecrawl" };
       }
     }
-  } catch { /* fall through to fallback */ }
-  return fallbackScrape(url);
+  } catch { /* caller decides the fallback */ }
+  return null;
 }
 
 export type ScreenshotResult =
@@ -35,7 +61,7 @@ export type ScreenshotResult =
 // in a headless browser and returns a full-page screenshot we can hand to the LLM.
 export async function screenshotPage(url: string): Promise<ScreenshotResult> {
   const key = cacheKey("firecrawl-shot", url);
-  return cached(key, 60_000, () => screenshotPageImpl(url));
+  return cached(key, SCRAPE_TTL, () => screenshotPageImpl(url));
 }
 
 async function screenshotPageImpl(url: string): Promise<ScreenshotResult> {
@@ -76,6 +102,11 @@ async function fallbackScrape(url: string): Promise<ScrapeResult> {
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return { ok: false, error: `Fetch failed: ${res.status}` };
+    // The route validated the original URL, but redirects can point anywhere —
+    // re-check the address the fetch actually landed on.
+    if (res.url && !checkPublicUrl(res.url).ok) {
+      return { ok: false, error: "Page redirected to an address that isn't publicly analyzable." };
+    }
     const html = await res.text();
     const text = html
       .replace(/<script[\s\S]*?<\/script>/gi, "")

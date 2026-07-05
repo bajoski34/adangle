@@ -37,6 +37,7 @@ export const SAMPLE_REPORT: {
       "placement": "hero + sticky header + bottom of page"
     },
     "emotionalAngle": "aspiration",
+    "angleEvidence": "'70,000 of the world's most ambitious companies' growing '3.2x faster than the average American business' — the page sells the company you could become, not the problem you have.",
     "weaknesses": [
       "The 'Get started for free' offer is vague; it's unclear what specifically is free, for how long, or if it's a freemium model vs. a limited trial, which creates friction for conversion.",
       "Excessive number of different calls-to-action (e.g., 'Get started for free', 'View Demo', 'Read the report', 'Watch Video', 'Switch in days', 'Explore Ramp Intelligence', 'Learn about Ramp Stack') creates decision paralysis and obscures the primary conversion path for a cold visitor.",

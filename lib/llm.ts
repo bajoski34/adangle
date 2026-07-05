@@ -57,7 +57,9 @@ type StructuredOpts<T> = {
 
 export async function structured<T>(opts: StructuredOpts<T>): Promise<T> {
   const key = cacheKey("llm", MODEL, opts.system, opts.prompt, ...(opts.images ?? []));
-  return cached(key, 1000 * 60 * 60, () => structuredImpl(opts));
+  // 24h: same page + same prompt within a day returns the cached result instead
+  // of spending free-tier quota. Rewrites bypass this via a random prompt seed.
+  return cached(key, 1000 * 60 * 60 * 24, () => structuredImpl(opts));
 }
 
 type AskResult = { ok: true; text: string } | { ok: false; status: number; body: string };

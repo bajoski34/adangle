@@ -1,21 +1,42 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { ArrowRight, Check, Copy, CopyCheck, Download, FileText, RefreshCw, Sparkles, Swords, TriangleAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, CopyCheck, Download, FileText, Hourglass, Pencil, RefreshCw, Sparkles, Swords, TriangleAlert } from "lucide-react";
 import type { PageBrief, GenOutput, CompareOutput } from "@/lib/schemas";
 import { LIMITS, adsEditorRsaCsv } from "@/lib/platforms";
 import { SAMPLE_REPORT } from "@/lib/sample-report";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { checkPublicUrl } from "@/lib/url-guard";
+
+type ApiError = { ok: false; error: string; code?: "quota"; daily?: boolean };
 
 type AnalyzeResponse =
   | { ok: true; url: string; title: string; source: "firecrawl" | "fallback" | "screenshot"; brief: PageBrief }
-  | { ok: false; error: string };
+  | ApiError;
 
-type GenerateResponse = { ok: true; assets: GenOutput } | { ok: false; error: string };
-type CompareResponse = { ok: true; comparison: CompareOutput } | { ok: false; error: string };
+type GenerateResponse = { ok: true; assets: GenOutput } | ApiError;
+type CompareResponse = { ok: true; comparison: CompareOutput } | ApiError;
+
+type UiError = { message: string; quota: boolean; daily: boolean };
+
+function toUiError(data: ApiError): UiError {
+  return { message: data.error, quota: data.code === "quota", daily: data.daily ?? false };
+}
+
+function unexpectedError(e: unknown, fallback: string): UiError {
+  return { message: e instanceof Error ? e.message : fallback, quota: false, daily: false };
+}
+
+// URL inputs are uncontrolled — a keystroke must never re-render the app tree
+// (with a report loaded that's hundreds of components per character). Forms
+// read their value here on submit instead.
+function fieldFromForm(e: React.FormEvent<HTMLFormElement>, name: string): string {
+  return String(new FormData(e.currentTarget).get(name) ?? "").trim();
+}
 type Comparison = { competitor: Extract<AnalyzeResponse, { ok: true }>; gaps: CompareOutput };
 
 /* ---------- The six persuasion angles, arranged around the dial ---------- */
@@ -55,45 +76,60 @@ const COMPARE_STAGES = [
 const SAMPLE_URLS = ["https://stripe.com", "https://linear.app", "https://www.notion.com"];
 
 export default function Home() {
-  const [url, setUrl] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UiError | null>(null);
   const [analysis, setAnalysis] = useState<Extract<AnalyzeResponse, { ok: true }> | null>(null);
   const [assets, setAssets] = useState<GenOutput | null>(null);
-  const [competitorUrl, setCompetitorUrl] = useState("");
   const [comparing, setComparing] = useState(false);
   const [comparison, setComparison] = useState<Comparison | null>(null);
 
+  // Deep links: /?url=… re-runs the analysis on load. Server-side caching absorbs
+  // repeats, so a shared link doesn't burn quota for a page analyzed recently.
+  useEffect(() => {
+    const shared = new URLSearchParams(window.location.search).get("url");
+    if (!shared) return;
+    const t = setTimeout(() => analyze(shared), 0);
+    return () => clearTimeout(t);
+  }, []);
+
   // Demo mode: a real, pre-baked report — zero network calls, nothing to rate-limit.
   function loadSample() {
+    window.history.replaceState(null, "", window.location.pathname);
     setError(null);
-    setUrl(SAMPLE_REPORT.url);
     setAnalysis({ ok: true, url: SAMPLE_REPORT.url, title: SAMPLE_REPORT.title, source: SAMPLE_REPORT.source, brief: SAMPLE_REPORT.brief });
     setAssets(SAMPLE_REPORT.assets);
     setComparison(null);
-    setCompetitorUrl("");
   }
 
   async function analyze(target: string) {
-    if (!target.trim()) return;
+    // Validate before touching any state — a typo shouldn't wipe a loaded report.
+    const check = checkPublicUrl(target);
+    if (!check.ok) {
+      setError({ message: check.reason, quota: false, daily: false });
+      return;
+    }
     setError(null);
     setAnalysis(null);
     setAssets(null);
     setComparison(null);
-    setCompetitorUrl("");
     setAnalyzing(true);
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: target.trim() }),
+        body: JSON.stringify({ url: check.url }),
       });
       const data: AnalyzeResponse = await res.json();
-      if (!data.ok) throw new Error(data.error);
+      if (!data.ok) {
+        setError(toUiError(data));
+        return;
+      }
       setAnalysis(data);
+      // Make the report linkable: refreshing or sharing this URL re-runs the reading.
+      window.history.replaceState(null, "", `?url=${encodeURIComponent(check.url)}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Analysis failed.");
+      setError(unexpectedError(e, "Analysis failed."));
     } finally {
       setAnalyzing(false);
     }
@@ -110,17 +146,25 @@ export default function Home() {
         body: JSON.stringify({ title: analysis.title, brief: analysis.brief }),
       });
       const data: GenerateResponse = await res.json();
-      if (!data.ok) throw new Error(data.error);
+      if (!data.ok) {
+        setError(toUiError(data));
+        return;
+      }
       setAssets(data.assets);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Generation failed.");
+      setError(unexpectedError(e, "Generation failed."));
     } finally {
       setGenerating(false);
     }
   }
 
-  async function compare() {
-    if (!analysis || !competitorUrl.trim()) return;
+  async function compare(competitorUrl: string) {
+    if (!analysis) return;
+    const check = checkPublicUrl(competitorUrl);
+    if (!check.ok) {
+      setError({ message: check.reason, quota: false, daily: false });
+      return;
+    }
     setError(null);
     setComparison(null);
     setComparing(true);
@@ -128,10 +172,13 @@ export default function Home() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: competitorUrl.trim() }),
+        body: JSON.stringify({ url: check.url }),
       });
       const data: AnalyzeResponse = await res.json();
-      if (!data.ok) throw new Error(data.error);
+      if (!data.ok) {
+        setError(toUiError(data));
+        return;
+      }
 
       const cres = await fetch("/api/compare", {
         method: "POST",
@@ -142,13 +189,28 @@ export default function Home() {
         }),
       });
       const cdata: CompareResponse = await cres.json();
-      if (!cdata.ok) throw new Error(cdata.error);
+      if (!cdata.ok) {
+        setError(toUiError(cdata));
+        return;
+      }
       setComparison({ competitor: data, gaps: cdata.comparison });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Comparison failed.");
+      setError(unexpectedError(e, "Comparison failed."));
     } finally {
       setComparing(false);
     }
+  }
+
+  function downloadKit() {
+    if (!analysis || !assets) return;
+    const blob = new Blob([kitMarkdown(analysis, assets, comparison)], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "adangle-campaign-kit.md";
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   const atWork = analyzing || analysis !== null;
@@ -167,8 +229,6 @@ export default function Home() {
     <div className="flex min-h-dvh w-full">
       {atWork && (
         <ConsoleRail
-          url={url}
-          setUrl={setUrl}
           onAnalyze={analyze}
           onLoadSample={loadSample}
           analyzing={analyzing}
@@ -192,46 +252,47 @@ export default function Home() {
               className="flex w-full max-w-md gap-2"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (!analyzing) analyze(url);
+                const v = fieldFromForm(e, "url");
+                if (v && !analyzing) analyze(v);
               }}
             >
               <Input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
+                name="url"
+                key={analysis?.url ?? ""}
+                defaultValue={analysis?.url ?? ""}
+                required
                 placeholder="https://another-page.com"
                 className="font-mono text-xs"
                 aria-label="Landing page URL"
               />
-              <Button type="submit" disabled={analyzing || !url.trim()}>
+              <Button type="submit" disabled={analyzing}>
                 Analyze
               </Button>
             </form>
           )}
+          <ThemeToggle />
         </header>
 
         <main className="mx-auto w-full max-w-4xl px-4 pb-24 lg:px-10">
           {!atWork && (
-            <Hero
-              url={url}
-              setUrl={setUrl}
-              onAnalyze={(u) => analyze(u)}
-              onLoadSample={loadSample}
-              disabled={analyzing}
-            />
+            <Hero onAnalyze={(u) => analyze(u)} onLoadSample={loadSample} disabled={analyzing} />
           )}
 
-          {error && (
-            <div
-              role="alert"
-              className="animate-rise mt-6 flex items-start gap-2.5 rounded-lg border border-signal/40 bg-signal/5 p-3.5 text-sm text-signal"
-            >
-              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-              <div>
-                <p className="font-medium">That didn&apos;t work.</p>
-                <p className="mt-0.5 text-signal/80">{error}</p>
+          {error &&
+            (error.quota ? (
+              <QuotaNotice error={error} onLoadSample={loadSample} />
+            ) : (
+              <div
+                role="alert"
+                className="animate-rise mt-6 flex items-start gap-2.5 rounded-lg border border-signal/40 bg-signal/5 p-3.5 text-sm text-signal"
+              >
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">That didn&apos;t work.</p>
+                  <p className="mt-0.5 text-signal/80">{error.message}</p>
+                </div>
               </div>
-            </div>
-          )}
+            ))}
 
           {analyzing && (
             <StageLoader title="Reading the page" stages={ANALYZE_STAGES} className="mt-10 lg:mt-20" />
@@ -242,12 +303,7 @@ export default function Home() {
               <section id="brief" className="animate-rise scroll-mt-8 space-y-4">
                 <SectionMark index="01" title="Persuasion brief" />
                 <BriefDossier analysis={analysis} />
-                <CompareBar
-                  value={competitorUrl}
-                  onChange={setCompetitorUrl}
-                  onCompare={compare}
-                  disabled={comparing}
-                />
+                <CompareBar key={analysis.url} onCompare={compare} disabled={comparing} />
                 {!assets && !generating && (
                   <Button
                     onClick={generate}
@@ -272,7 +328,16 @@ export default function Home() {
 
               {assets && (
                 <section id="kit" className="animate-rise scroll-mt-8 space-y-4">
-                  <SectionMark index={kitIndex} title="Campaign kit" />
+                  <SectionMark
+                    index={kitIndex}
+                    title="Campaign kit"
+                    action={
+                      <Button variant="ghost" size="sm" onClick={downloadKit}>
+                        <Download data-icon="inline-start" />
+                        Download kit (.md)
+                      </Button>
+                    }
+                  />
                   <KitDossier
                     assets={assets}
                     url={analysis.url}
@@ -287,6 +352,121 @@ export default function Home() {
         </main>
       </div>
     </div>
+  );
+}
+
+/* ---------- Whole-kit markdown export ---------- */
+
+function kitMarkdown(
+  analysis: Extract<AnalyzeResponse, { ok: true }>,
+  assets: GenOutput,
+  comparison: Comparison | null,
+): string {
+  const b = analysis.brief;
+  const angle = ANGLES.find((a) => a.key === b.emotionalAngle);
+  const lines: string[] = [
+    `# AdAngle campaign kit — ${analysis.title}`,
+    ``,
+    `${analysis.url}`,
+    `Generated ${new Date().toISOString().slice(0, 10)} · Emotional angle: ${angle?.label ?? b.emotionalAngle}`,
+    ``,
+    `## Persuasion brief`,
+    ``,
+    `- **Offer:** ${b.offer}`,
+    `- **Audience:** ${b.audience}`,
+    `- **Primary hook:** ${b.primaryHook}`,
+    `- **Call to action:** "${b.cta.text}" — ${b.cta.placement}`,
+    ...(b.angleEvidence ? [`- **Angle evidence:** ${b.angleEvidence}`] : []),
+    ``,
+    `### Pain points`,
+    ...b.painPoints.map((p) => `- ${p}`),
+    ``,
+    `### Proof elements`,
+    ...b.proofElements.map((p) => `- ${p}`),
+  ];
+  if (b.weaknesses.length) {
+    lines.push(``, `### Where the pitch leaks`, ...b.weaknesses.map((w) => `- ${w}`));
+  }
+  if (comparison) {
+    const g = comparison.gaps;
+    lines.push(
+      ``,
+      `## Competitor gap analysis — vs ${comparison.competitor.title}`,
+      ``,
+      `### Angle gaps`,
+      ...g.angleGaps.map((x) => `- ${x}`),
+      ``,
+      `### Proof gaps`,
+      ...g.proofGaps.map((x) => `- ${x}`),
+      ``,
+      `### Open positions`,
+      ...g.positioningOpportunities.map((x) => `- ${x}`),
+      ``,
+      `### Counter-angles`,
+      ...g.counterAngles.flatMap((c) => [`- **${c.angle}** — ${c.rationale}`, `  - Hook: "${c.exampleHook}"`]),
+    );
+  }
+  lines.push(
+    ``,
+    `## Google RSA`,
+    ``,
+    `### Headlines (≤${LIMITS.googleRSA.headline} chars)`,
+    ...assets.googleRSA.headlines.map((h) => `- ${h}`),
+    ``,
+    `### Descriptions (≤${LIMITS.googleRSA.description} chars)`,
+    ...assets.googleRSA.descriptions.map((d) => `- ${d}`),
+    ``,
+    `## Meta`,
+    ...assets.meta.flatMap((v, i) => [
+      ``,
+      `### Variant ${i + 1} — ${v.angle}`,
+      `- Primary text: ${v.primaryText}`,
+      `- Headline: ${v.headline}`,
+      `- Description: ${v.description}`,
+    ]),
+    ``,
+    `## TikTok hooks`,
+    ...assets.tiktokHooks.map((h) => `- ${h}`),
+    ``,
+    `## Taboola headlines`,
+    ...assets.taboolaHeadlines.map((h) => `- ${h}`),
+    ``,
+    `## A/B tests`,
+    ...assets.abTests.flatMap((t) => [
+      ``,
+      `### ${t.hypothesis}`,
+      `- Priority: ${t.priority}`,
+      `- A: ${t.variantA}`,
+      `- B: ${t.variantB}`,
+      `- Measure: ${t.metric}`,
+    ]),
+    ``,
+    `## Landing-page fixes`,
+    ...assets.lpFixes.flatMap((f) => [``, `### ${f.problem}`, `- Fix: ${f.fix}`, `- Effort: ${f.effort}`]),
+    ``,
+  );
+  return lines.join("\n");
+}
+
+/* ---------- Quota notice — the expected failure, treated as a state, not an error ---------- */
+
+function QuotaNotice({ error, onLoadSample }: { error: UiError; onLoadSample: () => void }) {
+  return (
+    <Card className="animate-rise mx-auto mt-10 w-full max-w-md gap-0 p-6 text-center" role="status">
+      <Hourglass className="mx-auto size-5 text-primary" aria-hidden />
+      <p className="mt-3 font-display font-stretch-expanded text-sm font-extrabold tracking-wide uppercase">
+        {error.daily ? "Today's readings are spent" : "The instrument needs a minute"}
+      </p>
+      <p className="mt-2 text-sm text-muted-foreground">
+        {error.daily
+          ? "The free AI tier caps requests per day, and this key just hit the ceiling. Nothing is wrong with the page — the quota resets at midnight Pacific."
+          : "The AI provider is rate-limiting right now. Nothing is wrong with the page — give it a minute, then try again."}
+      </p>
+      <Button onClick={onLoadSample} className="mt-5 w-full">
+        <FileText data-icon="inline-start" className="size-4" />
+        View the sample report instead
+      </Button>
+    </Card>
   );
 }
 
@@ -320,8 +500,6 @@ function useScrollSpy(ids: string[]) {
 /* ---------- The console — instrument rail, always mounted ---------- */
 
 function ConsoleRail({
-  url,
-  setUrl,
   onAnalyze,
   onLoadSample,
   analyzing,
@@ -331,8 +509,6 @@ function ConsoleRail({
   kitIndex,
   activeId,
 }: {
-  url: string;
-  setUrl: (v: string) => void;
   onAnalyze: (u: string) => void;
   onLoadSample: () => void;
   analyzing: boolean;
@@ -352,7 +528,8 @@ function ConsoleRail({
         className="mt-7 space-y-2 px-6"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!analyzing) onAnalyze(url);
+          const v = fieldFromForm(e, "url");
+          if (v && !analyzing) onAnalyze(v);
         }}
       >
         <label
@@ -363,20 +540,27 @@ function ConsoleRail({
         </label>
         <Input
           id="console-url"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          name="url"
+          key={analysis?.url ?? ""}
+          defaultValue={analysis?.url ?? ""}
+          required
           placeholder="https://example.com/landing-page"
           className="bg-card font-mono text-xs"
         />
-        <Button type="submit" size="sm" className="w-full" disabled={analyzing || !url.trim()}>
+        <Button type="submit" size="sm" className="w-full" disabled={analyzing}>
           {analyzing ? "Reading…" : analysis ? "Analyze another page" : "Analyze page"}
         </Button>
       </form>
 
       <div className="mt-7 flex flex-col items-center border-y bg-muted/40 px-6 py-6">
-        <div className={`w-full max-w-[240px] ${analyzing ? "animate-pulse-soft" : ""}`}>
-          <AngleDial active={analysis?.brief.emotionalAngle ?? null} compact />
+        <div className="w-full max-w-[240px]">
+          <AngleDial active={analysis?.brief.emotionalAngle ?? null} compact hunting={analyzing} />
         </div>
+        {analysis?.brief.angleEvidence && (
+          <p className="mt-4 w-full border-l-2 border-primary/40 pl-3 text-left text-xs leading-relaxed text-muted-foreground italic [overflow-wrap:anywhere]">
+            {analysis.brief.angleEvidence}
+          </p>
+        )}
       </div>
 
       {analysis ? (
@@ -431,7 +615,7 @@ function ConsoleRail({
         </div>
       )}
 
-      <div className="border-t px-6 py-4">
+      <div className="flex items-center justify-between border-t px-6 py-4">
         <button
           type="button"
           onClick={onLoadSample}
@@ -440,6 +624,7 @@ function ConsoleRail({
           <FileText className="size-3" />
           View a sample report
         </button>
+        <ThemeToggle />
       </div>
     </aside>
   );
@@ -530,7 +715,15 @@ function Wordmark() {
   );
 }
 
-function SectionMark({ index, title }: { index: string; title: string }) {
+function SectionMark({
+  index,
+  title,
+  action,
+}: {
+  index: string;
+  title: string;
+  action?: React.ReactNode;
+}) {
   return (
     <div className="flex items-baseline gap-3">
       <span className="font-mono text-xs font-medium text-primary">{index}</span>
@@ -538,6 +731,7 @@ function SectionMark({ index, title }: { index: string; title: string }) {
         {title}
       </h2>
       <div className="h-px flex-1 self-center bg-border" />
+      {action && <div className="self-center">{action}</div>}
     </div>
   );
 }
@@ -545,14 +739,10 @@ function SectionMark({ index, title }: { index: string; title: string }) {
 /* ---------- Hero ---------- */
 
 function Hero({
-  url,
-  setUrl,
   onAnalyze,
   onLoadSample,
   disabled,
 }: {
-  url: string;
-  setUrl: (v: string) => void;
   onAnalyze: (u: string) => void;
   onLoadSample: () => void;
   disabled: boolean;
@@ -589,20 +779,21 @@ function Hero({
         style={{ animationDelay: "180ms" }}
         onSubmit={(e) => {
           e.preventDefault();
-          if (!disabled) onAnalyze(url);
+          const v = fieldFromForm(e, "url");
+          if (v && !disabled) onAnalyze(v);
         }}
       >
         <Input
           autoFocus
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          name="url"
+          required
           placeholder="https://example.com/landing-page"
           className="h-13 flex-1 rounded-xl border-2 bg-card px-4 font-mono text-sm shadow-xs"
           aria-label="Landing page URL"
         />
         <Button
           type="submit"
-          disabled={disabled || !url.trim()}
+          disabled={disabled}
           className="h-13 rounded-xl px-6 text-base font-semibold"
         >
           Analyze page
@@ -619,10 +810,7 @@ function Hero({
           <button
             key={u}
             type="button"
-            onClick={() => {
-              setUrl(u);
-              onAnalyze(u);
-            }}
+            onClick={() => onAnalyze(u)}
             className="rounded-full border bg-card px-3 py-1 font-mono text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary focus-visible:ring-3 focus-visible:ring-ring/50 outline-none"
           >
             {u.replace(/^https:\/\/(www\.)?/, "")}
@@ -709,7 +897,11 @@ function StageLoader({
 
 /* ---------- Persuasion brief ---------- */
 
-function BriefDossier({ analysis }: { analysis: Extract<AnalyzeResponse, { ok: true }> }) {
+const BriefDossier = memo(function BriefDossier({
+  analysis,
+}: {
+  analysis: Extract<AnalyzeResponse, { ok: true }>;
+}) {
   const b = analysis.brief;
   return (
     <Card className="gap-0 overflow-hidden p-0">
@@ -740,6 +932,11 @@ function BriefDossier({ analysis }: { analysis: Extract<AnalyzeResponse, { ok: t
       {/* On desktop the dial lives on the console rail; keep it in the dossier for small screens. */}
       <div className="flex flex-col items-center border-t bg-muted/50 px-6 py-7 lg:hidden">
         <AngleDial active={b.emotionalAngle} />
+        {b.angleEvidence && (
+          <p className="mt-4 w-full max-w-[340px] border-l-2 border-primary/40 pl-3 text-left text-xs leading-relaxed text-muted-foreground italic [overflow-wrap:anywhere]">
+            {b.angleEvidence}
+          </p>
+        )}
       </div>
 
       {b.weaknesses.length > 0 && (
@@ -759,7 +956,7 @@ function BriefDossier({ analysis }: { analysis: Extract<AnalyzeResponse, { ok: t
       )}
     </Card>
   );
-}
+});
 
 function Field({ label, value }: { label: string; value: string }) {
   return (
@@ -794,14 +991,10 @@ function ListField({ label, items }: { label: string; items: string[] }) {
 /* ---------- Competitor comparison ---------- */
 
 function CompareBar({
-  value,
-  onChange,
   onCompare,
   disabled,
 }: {
-  value: string;
-  onChange: (v: string) => void;
-  onCompare: () => void;
+  onCompare: (competitorUrl: string) => void;
   disabled: boolean;
 }) {
   return (
@@ -809,7 +1002,8 @@ function CompareBar({
       className="flex flex-col gap-2 rounded-xl border border-dashed bg-card/60 p-3 sm:flex-row sm:items-center"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!disabled) onCompare();
+        const v = fieldFromForm(e, "competitor");
+        if (v && !disabled) onCompare(v);
       }}
     >
       <div className="flex items-center gap-2 text-sm font-medium">
@@ -817,20 +1011,20 @@ function CompareBar({
         <span className="whitespace-nowrap">Compare against a competitor</span>
       </div>
       <Input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
+        name="competitor"
+        required
         placeholder="https://their-landing-page.com"
         className="flex-1 font-mono text-xs"
         aria-label="Competitor landing page URL"
       />
-      <Button type="submit" variant="outline" disabled={disabled || !value.trim()}>
+      <Button type="submit" variant="outline" disabled={disabled}>
         Find the gaps
       </Button>
     </form>
   );
 }
 
-function CompareSection({
+const CompareSection = memo(function CompareSection({
   you,
   comparison,
 }: {
@@ -884,7 +1078,7 @@ function CompareSection({
       </div>
     </div>
   );
-}
+});
 
 function MiniBrief({
   label,
@@ -960,9 +1154,12 @@ function HookLine({ text }: { text: string }) {
 function AngleDial({
   active,
   compact = false,
+  hunting = false,
 }: {
   active: PageBrief["emotionalAngle"] | null;
   compact?: boolean;
+  /** Needle sweeps the dial looking for the angle — the working-phase animation. */
+  hunting?: boolean;
 }) {
   const activeIndex = active ? ANGLES.findIndex((a) => a.key === active) : -1;
   const targetDeg = activeIndex >= 0 ? 15 + activeIndex * 30 : 0;
@@ -986,7 +1183,13 @@ function AngleDial({
         viewBox="-30 -16 260 130"
         className="w-full"
         role="img"
-        aria-label={angleMeta ? `Detected emotional angle: ${angleMeta.label}` : "Angle dial standing by"}
+        aria-label={
+          hunting
+            ? "Angle dial taking a reading"
+            : angleMeta
+              ? `Detected emotional angle: ${angleMeta.label}`
+              : "Angle dial standing by"
+        }
       >
         <path
           d="M 22 96 A 78 78 0 0 1 178 96"
@@ -1025,12 +1228,16 @@ function AngleDial({
           );
         })}
         <g
-          className="motion-transition"
-          style={{
-            transform: `rotate(${deg}deg)`,
-            transformOrigin: "100px 96px",
-            transition: "transform 1.1s cubic-bezier(0.34, 1.3, 0.5, 1)",
-          }}
+          className={hunting ? "animate-hunt" : "motion-transition"}
+          style={
+            hunting
+              ? undefined
+              : {
+                  transform: `rotate(${deg}deg)`,
+                  transformOrigin: "100px 96px",
+                  transition: "transform 1.1s cubic-bezier(0.34, 1.3, 0.5, 1)",
+                }
+          }
         >
           <line x1="100" y1="96" x2="40" y2="96" className="stroke-foreground" strokeWidth="2" strokeLinecap="round" />
         </g>
@@ -1055,14 +1262,14 @@ function AngleDial({
         ) : (
           <>
             <p
-              className={`mt-0.5 font-display font-stretch-expanded font-extrabold text-muted-foreground/70 uppercase ${
-                compact ? "text-lg" : "text-xl"
-              }`}
+              className={`mt-0.5 font-display font-stretch-expanded font-extrabold uppercase ${
+                hunting ? "text-foreground" : "text-muted-foreground/70"
+              } ${compact ? "text-lg" : "text-xl"}`}
             >
-              Standing by
+              {hunting ? "Reading" : "Standing by"}
             </p>
             <p className={`text-muted-foreground ${compact ? "text-xs" : "text-sm"}`}>
-              Paste a page to take a reading
+              {hunting ? "Locating the angle" : "Paste a page to take a reading"}
             </p>
           </>
         )}
@@ -1098,7 +1305,7 @@ function KitHead({ title, hint, right }: { title: string; hint?: string; right?:
   );
 }
 
-function KitDossier({
+const KitDossier = memo(function KitDossier({
   assets,
   url,
   title,
@@ -1253,7 +1460,7 @@ function KitDossier({
       </section>
     </div>
   );
-}
+});
 
 function TestArm({ arm, text }: { arm: string; text: string }) {
   return (
@@ -1357,6 +1564,7 @@ function CopyGroup({
             text={it}
             limit={limit}
             delay={i * 40}
+            onEdit={rewrite && ((t: string) => rewrite.onItem(i, t))}
             rewrite={
               rewrite && {
                 kind: rewrite.kind,
@@ -1389,6 +1597,7 @@ function CopyLine({
   muted = false,
   delay = 0,
   rewrite,
+  onEdit,
 }: {
   text: string;
   limit: number;
@@ -1397,13 +1606,30 @@ function CopyLine({
   muted?: boolean;
   delay?: number;
   rewrite?: RewriteLineCtx;
+  /** Enables click-to-edit; called with the committed text. */
+  onEdit?: (newText: string) => void;
 }) {
   const [copied, copy] = useCopied();
   const [tonesOpen, setTonesOpen] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const [rewriteError, setRewriteError] = useState<string | null>(null);
-  const over = text.length > limit;
-  const pct = Math.min(text.length / limit, 1) * 100;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const shown = editing ? draft : text;
+  const over = shown.length > limit;
+  const pct = Math.min(shown.length / limit, 1) * 100;
+
+  function startEdit() {
+    if (!onEdit) return;
+    setDraft(text);
+    setEditing(true);
+  }
+
+  function commitEdit() {
+    setEditing(false);
+    const t = draft.trim();
+    if (onEdit && t && t !== text) onEdit(t);
+  }
 
   async function doRewrite(tone: string) {
     if (!rewrite) return;
@@ -1436,22 +1662,58 @@ function CopyLine({
       style={delay ? { animationDelay: `${delay}ms` } : undefined}
     >
       <div className="flex items-start justify-between gap-2">
-        <p
-          className={`min-w-0 text-sm [overflow-wrap:anywhere] ${emphasize ? "font-semibold" : ""} ${
-            muted ? "text-muted-foreground" : ""
-          }`}
-        >
-          {text}
-        </p>
+        {editing ? (
+          <textarea
+            autoFocus
+            value={draft}
+            rows={Math.max(1, Math.ceil(draft.length / 50))}
+            onFocus={(e) => e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitEdit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                commitEdit();
+              }
+              if (e.key === "Escape") {
+                setDraft(text);
+                setEditing(false);
+              }
+            }}
+            className="min-w-0 flex-1 resize-none bg-transparent text-sm outline-none [field-sizing:content]"
+            aria-label="Edit this line"
+          />
+        ) : (
+          <p
+            onClick={startEdit}
+            title={onEdit ? "Click to edit" : undefined}
+            className={`min-w-0 text-sm [overflow-wrap:anywhere] ${emphasize ? "font-semibold" : ""} ${
+              muted ? "text-muted-foreground" : ""
+            } ${onEdit ? "cursor-text" : ""}`}
+          >
+            {text}
+          </p>
+        )}
         <div className="flex shrink-0 items-center gap-1.5">
           <span
             className={`font-mono text-[11px] tabular-nums ${
               over ? "font-bold text-signal" : "text-muted-foreground"
             }`}
-            title={over ? `${text.length - limit} characters over the limit` : `${limit - text.length} characters to spare`}
+            title={over ? `${shown.length - limit} characters over the limit` : `${limit - shown.length} characters to spare`}
           >
-            {text.length}/{limit}
+            {shown.length}/{limit}
           </span>
+          {onEdit && !editing && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={startEdit}
+              aria-label="Edit this line"
+              className="opacity-40 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            >
+              <Pencil />
+            </Button>
+          )}
           {rewrite && (
             <Button
               variant="ghost"
