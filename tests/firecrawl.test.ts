@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { scrapePage, screenshotPage } from "@/lib/firecrawl";
 
 let fetchMock: Mock;
@@ -8,6 +8,10 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
 });
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 // scrapePage/screenshotPage memoize by URL with a shared module-level cache,
 // so every test must use a distinct URL.
 
@@ -15,7 +19,43 @@ function firecrawlOk(data: Record<string, unknown>) {
   return new Response(JSON.stringify({ data }), { status: 200 });
 }
 
-describe("scrapePage", () => {
+describe("scrapePage (frugal mode — the default)", () => {
+  beforeEach(() => {
+    vi.stubEnv("SCRAPE_MODE", "frugal");
+  });
+
+  it("uses the free direct fetch alone when the page has enough text", async () => {
+    const rich = `<html><head><title>Rich Page</title></head><body>${"persuasive copy ".repeat(60)}</body></html>`;
+    fetchMock.mockResolvedValueOnce(new Response(rich, { status: 200 }));
+    const r = await scrapePage("https://f.example/rich");
+    expect(r.ok && r.source).toBe("fallback");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://f.example/rich"); // no Firecrawl credit spent
+  });
+
+  it("spends a Firecrawl credit only when the free fetch comes back thin", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("<html><body>JS shell</body></html>", { status: 200 })) // thin
+      .mockResolvedValueOnce(firecrawlOk({ markdown: "# Real content", metadata: { title: "Rendered" } }));
+    const r = await scrapePage("https://f.example/shell");
+    expect(r).toMatchObject({ ok: true, source: "firecrawl", title: "Rendered" });
+    expect(fetchMock.mock.calls[1][0]).toBe("https://api.firecrawl.dev/v1/scrape");
+  });
+
+  it("returns the thin free result when Firecrawl also fails", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("<html><body>tiny</body></html>", { status: 200 }))
+      .mockRejectedValueOnce(new Error("firecrawl down"));
+    const r = await scrapePage("https://f.example/thin-only");
+    expect(r.ok && r.source).toBe("fallback");
+    expect(r.ok && r.markdown).toBe("tiny");
+  });
+});
+
+describe("scrapePage (quality mode: SCRAPE_MODE=quality leads with Firecrawl)", () => {
+  beforeEach(() => {
+    vi.stubEnv("SCRAPE_MODE", "quality");
+  });
   it("returns Firecrawl markdown with its title", async () => {
     fetchMock.mockResolvedValueOnce(
       firecrawlOk({ markdown: "# Offer\nGreat product", metadata: { title: "Great Product" } }),

@@ -163,6 +163,27 @@
     }
   }
 
+  /* Working-phase needle: sweeps the dial while the page is being read */
+  @keyframes hunt {
+    0%,
+    100% {
+      transform: rotate(16deg);
+    }
+    30% {
+      transform: rotate(148deg);
+    }
+    55% {
+      transform: rotate(64deg);
+    }
+    80% {
+      transform: rotate(122deg);
+    }
+  }
+  .animate-hunt {
+    animation: hunt 3.4s ease-in-out infinite;
+    transform-origin: 100px 96px;
+  }
+
   @keyframes pulse-soft {
     50% {
       opacity: 0.45;
@@ -174,7 +195,8 @@
 
   @media (prefers-reduced-motion: reduce) {
     .animate-rise,
-    .animate-pulse-soft {
+    .animate-pulse-soft,
+    .animate-hunt {
       animation: none;
     }
     .motion-transition {

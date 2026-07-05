@@ -27,7 +27,10 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     console.error("[compare] failure:", e);
     if (e instanceof LLMQuotaError) {
-      return NextResponse.json({ ok: false, error: quotaErrorMessage(e) }, { status: 503 });
+      return NextResponse.json(
+        { ok: false, error: quotaErrorMessage(e), code: "quota", daily: e.daily },
+        { status: 503 },
+      );
     }
     return NextResponse.json({ ok: false, error: "Comparison failed after retry." }, { status: 502 });
   }

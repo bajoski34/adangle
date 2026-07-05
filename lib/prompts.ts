@@ -12,6 +12,7 @@ const BRIEF_FIELDS = `Return a JSON object with exactly these fields:
 - "proofElements": every credibility element present (testimonials, review counts, client logos, statistics, guarantees, certifications, press mentions). Empty array if none.
 - "cta": { "text": the primary call-to-action wording, "placement": where it appears (e.g. "hero + sticky header", "bottom of page only") }
 - "emotionalAngle": the dominant emotional driver — one of "fear", "aspiration", "urgency", "trust", "curiosity", "value"
+- "angleEvidence": one sentence naming the strongest element on the page that justifies the emotionalAngle call — quote the page verbatim where possible ("Join 70,000 ambitious companies" → aspiration). Not advice, just the evidence.
 - "weaknesses": up to 5 conversion weaknesses a media buyer should fix before spending traffic on this page, most costly first. Be specific: "CTA below the fold with no sticky header" not "CTA could be better".`;
 
 export function extractPrompt(title: string, markdown: string): string {

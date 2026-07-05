@@ -1,22 +1,42 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { ArrowRight, Check, Copy, CopyCheck, Download, FileText, RefreshCw, Sparkles, Swords, TriangleAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, CopyCheck, Download, FileText, Hourglass, Pencil, RefreshCw, Sparkles, Swords, TriangleAlert } from "lucide-react";
 import type { PageBrief, GenOutput, CompareOutput } from "@/lib/schemas";
 import { LIMITS, adsEditorRsaCsv } from "@/lib/platforms";
 import { SAMPLE_REPORT } from "@/lib/sample-report";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { checkPublicUrl } from "@/lib/url-guard";
+
+type ApiError = { ok: false; error: string; code?: "quota"; daily?: boolean };
 
 type AnalyzeResponse =
   | { ok: true; url: string; title: string; source: "firecrawl" | "fallback" | "screenshot"; brief: PageBrief }
-  | { ok: false; error: string };
+  | ApiError;
 
-type GenerateResponse = { ok: true; assets: GenOutput } | { ok: false; error: string };
-type CompareResponse = { ok: true; comparison: CompareOutput } | { ok: false; error: string };
+type GenerateResponse = { ok: true; assets: GenOutput } | ApiError;
+type CompareResponse = { ok: true; comparison: CompareOutput } | ApiError;
+
+type UiError = { message: string; quota: boolean; daily: boolean };
+
+function toUiError(data: ApiError): UiError {
+  return { message: data.error, quota: data.code === "quota", daily: data.daily ?? false };
+}
+
+function unexpectedError(e: unknown, fallback: string): UiError {
+  return { message: e instanceof Error ? e.message : fallback, quota: false, daily: false };
+}
+
+// URL inputs are uncontrolled — a keystroke must never re-render the app tree
+// (with a report loaded that's hundreds of components per character). Forms
+// read their value here on submit instead.
+function fieldFromForm(e: React.FormEvent<HTMLFormElement>, name: string): string {
+  return String(new FormData(e.currentTarget).get(name) ?? "").trim();
+}
 type Comparison = { competitor: Extract<AnalyzeResponse, { ok: true }>; gaps: CompareOutput };
 
 /* ---------- The six persuasion angles, arranged around the dial ---------- */
@@ -56,45 +76,60 @@ const COMPARE_STAGES = [
 const SAMPLE_URLS = ["https://stripe.com", "https://linear.app", "https://www.notion.com"];
 
 export default function Home() {
-  const [url, setUrl] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UiError | null>(null);
   const [analysis, setAnalysis] = useState<Extract<AnalyzeResponse, { ok: true }> | null>(null);
   const [assets, setAssets] = useState<GenOutput | null>(null);
-  const [competitorUrl, setCompetitorUrl] = useState("");
   const [comparing, setComparing] = useState(false);
   const [comparison, setComparison] = useState<Comparison | null>(null);
 
+  // Deep links: /?url=… re-runs the analysis on load. Server-side caching absorbs
+  // repeats, so a shared link doesn't burn quota for a page analyzed recently.
+  useEffect(() => {
+    const shared = new URLSearchParams(window.location.search).get("url");
+    if (!shared) return;
+    const t = setTimeout(() => analyze(shared), 0);
+    return () => clearTimeout(t);
+  }, []);
+
   // Demo mode: a real, pre-baked report — zero network calls, nothing to rate-limit.
   function loadSample() {
+    window.history.replaceState(null, "", window.location.pathname);
     setError(null);
-    setUrl(SAMPLE_REPORT.url);
     setAnalysis({ ok: true, url: SAMPLE_REPORT.url, title: SAMPLE_REPORT.title, source: SAMPLE_REPORT.source, brief: SAMPLE_REPORT.brief });
     setAssets(SAMPLE_REPORT.assets);
     setComparison(null);
-    setCompetitorUrl("");
   }
 
   async function analyze(target: string) {
-    if (!target.trim()) return;
+    // Validate before touching any state — a typo shouldn't wipe a loaded report.
+    const check = checkPublicUrl(target);
+    if (!check.ok) {
+      setError({ message: check.reason, quota: false, daily: false });
+      return;
+    }
     setError(null);
     setAnalysis(null);
     setAssets(null);
     setComparison(null);
-    setCompetitorUrl("");
     setAnalyzing(true);
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: target.trim() }),
+        body: JSON.stringify({ url: check.url }),
       });
       const data: AnalyzeResponse = await res.json();
-      if (!data.ok) throw new Error(data.error);
+      if (!data.ok) {
+        setError(toUiError(data));
+        return;
+      }
       setAnalysis(data);
+      // Make the report linkable: refreshing or sharing this URL re-runs the reading.
+      window.history.replaceState(null, "", `?url=${encodeURIComponent(check.url)}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Analysis failed.");
+      setError(unexpectedError(e, "Analysis failed."));
     } finally {
       setAnalyzing(false);
     }
@@ -111,17 +146,25 @@ export default function Home() {
         body: JSON.stringify({ title: analysis.title, brief: analysis.brief }),
       });
       const data: GenerateResponse = await res.json();
-      if (!data.ok) throw new Error(data.error);
+      if (!data.ok) {
+        setError(toUiError(data));
+        return;
+      }
       setAssets(data.assets);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Generation failed.");
+      setError(unexpectedError(e, "Generation failed."));
     } finally {
       setGenerating(false);
     }
   }
 
-  async function compare() {
-    if (!analysis || !competitorUrl.trim()) return;
+  async function compare(competitorUrl: string) {
+    if (!analysis) return;
+    const check = checkPublicUrl(competitorUrl);
+    if (!check.ok) {
+      setError({ message: check.reason, quota: false, daily: false });
+      return;
+    }
     setError(null);
     setComparison(null);
     setComparing(true);
@@ -129,10 +172,13 @@ export default function Home() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: competitorUrl.trim() }),
+        body: JSON.stringify({ url: check.url }),
       });
       const data: AnalyzeResponse = await res.json();
-      if (!data.ok) throw new Error(data.error);
+      if (!data.ok) {
+        setError(toUiError(data));
+        return;
+      }
 
       const cres = await fetch("/api/compare", {
         method: "POST",
@@ -143,119 +189,506 @@ export default function Home() {
         }),
       });
       const cdata: CompareResponse = await cres.json();
-      if (!cdata.ok) throw new Error(cdata.error);
+      if (!cdata.ok) {
+        setError(toUiError(cdata));
+        return;
+      }
       setComparison({ competitor: data, gaps: cdata.comparison });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Comparison failed.");
+      setError(unexpectedError(e, "Comparison failed."));
     } finally {
       setComparing(false);
     }
   }
 
+  function downloadKit() {
+    if (!analysis || !assets) return;
+    const blob = new Blob([kitMarkdown(analysis, assets, comparison)], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "adangle-campaign-kit.md";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   const atWork = analyzing || analysis !== null;
   const kitIndex = comparison || comparing ? "03" : "02";
 
-  return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24">
-      <header className="flex items-center justify-between py-5">
-        <Wordmark />
-        {atWork && (
-          <form
-            className="flex w-full max-w-md gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!analyzing) analyze(url);
-            }}
-          >
-            <Input
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://another-page.com"
-              className="font-mono text-xs"
-              aria-label="Landing page URL"
-            />
-            <Button type="submit" disabled={analyzing || !url.trim()}>
-              Analyze
-            </Button>
-          </form>
-        )}
-      </header>
+  const navIds = analysis
+    ? [
+        "brief",
+        ...(comparison ? ["gaps"] : []),
+        ...(assets ? ["kit", ...KIT_SECTIONS.map((s) => s.id)] : []),
+      ]
+    : [];
+  const activeId = useScrollSpy(navIds);
 
-      {!atWork && (
-        <Hero
-          url={url}
-          setUrl={setUrl}
-          onAnalyze={(u) => analyze(u)}
+  return (
+    <div className="flex min-h-dvh w-full">
+      {atWork && (
+        <ConsoleRail
+          onAnalyze={analyze}
           onLoadSample={loadSample}
-          disabled={analyzing}
+          analyzing={analyzing}
+          analysis={analysis}
+          assets={assets}
+          comparison={comparison}
+          kitIndex={kitIndex}
+          activeId={activeId}
         />
       )}
 
-      {error && (
-        <div
-          role="alert"
-          className="animate-rise mt-6 flex items-start gap-2.5 rounded-lg border border-signal/40 bg-signal/5 p-3.5 text-sm text-signal"
+      <div className="min-w-0 flex-1">
+        <header
+          className={`mx-auto flex w-full max-w-4xl items-center justify-between gap-4 px-4 py-5 ${
+            atWork ? "lg:hidden" : ""
+          }`}
         >
-          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          <div>
-            <p className="font-medium">That didn't work.</p>
-            <p className="mt-0.5 text-signal/80">{error}</p>
-          </div>
-        </div>
-      )}
-
-      {analyzing && (
-        <StageLoader title="Reading the page" stages={ANALYZE_STAGES} className="mt-10" />
-      )}
-
-      {analysis && (
-        <div className="mt-8 space-y-10">
-          <section className="animate-rise space-y-4">
-            <SectionMark index="01" title="Persuasion brief" />
-            <BriefDossier analysis={analysis} />
-            <CompareBar
-              value={competitorUrl}
-              onChange={setCompetitorUrl}
-              onCompare={compare}
-              disabled={comparing}
-            />
-            {!assets && !generating && (
-              <Button
-                onClick={generate}
-                className="h-12 w-full px-6 text-base font-semibold"
-              >
-                <Sparkles data-icon="inline-start" className="size-4.5" />
-                Write the campaign kit
-              </Button>
-            )}
-          </section>
-
-          {comparing && <StageLoader title="Sizing up the competitor" stages={COMPARE_STAGES} />}
-
-          {comparison && (
-            <section className="animate-rise space-y-4">
-              <SectionMark index="02" title="Competitor gap analysis" />
-              <CompareSection you={analysis} comparison={comparison} />
-            </section>
-          )}
-
-          {generating && <StageLoader title="Writing the kit" stages={GENERATE_STAGES} />}
-
-          {assets && (
-            <section className="animate-rise space-y-4">
-              <SectionMark index={kitIndex} title="Campaign kit" />
-              <AssetTabs
-                assets={assets}
-                url={analysis.url}
-                title={analysis.title}
-                brief={analysis.brief}
-                onAssetsChange={setAssets}
+          <Wordmark />
+          {atWork && (
+            <form
+              className="flex w-full max-w-md gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const v = fieldFromForm(e, "url");
+                if (v && !analyzing) analyze(v);
+              }}
+            >
+              <Input
+                name="url"
+                key={analysis?.url ?? ""}
+                defaultValue={analysis?.url ?? ""}
+                required
+                placeholder="https://another-page.com"
+                className="font-mono text-xs"
+                aria-label="Landing page URL"
               />
-            </section>
+              <Button type="submit" disabled={analyzing}>
+                Analyze
+              </Button>
+            </form>
           )}
+          <ThemeToggle />
+        </header>
+
+        <main className="mx-auto w-full max-w-4xl px-4 pb-24 lg:px-10">
+          {!atWork && (
+            <Hero onAnalyze={(u) => analyze(u)} onLoadSample={loadSample} disabled={analyzing} />
+          )}
+
+          {error &&
+            (error.quota ? (
+              <QuotaNotice error={error} onLoadSample={loadSample} />
+            ) : (
+              <div
+                role="alert"
+                className="animate-rise mt-6 flex items-start gap-2.5 rounded-lg border border-signal/40 bg-signal/5 p-3.5 text-sm text-signal"
+              >
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">That didn&apos;t work.</p>
+                  <p className="mt-0.5 text-signal/80">{error.message}</p>
+                </div>
+              </div>
+            ))}
+
+          {analyzing && (
+            <StageLoader title="Reading the page" stages={ANALYZE_STAGES} className="mt-10 lg:mt-20" />
+          )}
+
+          {analysis && (
+            <div className="space-y-12 pt-2 lg:pt-10">
+              <section id="brief" className="animate-rise scroll-mt-8 space-y-4">
+                <SectionMark index="01" title="Persuasion brief" />
+                <BriefDossier analysis={analysis} />
+                <CompareBar key={analysis.url} onCompare={compare} disabled={comparing} />
+                {!assets && !generating && (
+                  <Button
+                    onClick={generate}
+                    className="h-12 w-full px-6 text-base font-semibold"
+                  >
+                    <Sparkles data-icon="inline-start" className="size-4.5" />
+                    Write the campaign kit
+                  </Button>
+                )}
+              </section>
+
+              {comparing && <StageLoader title="Sizing up the competitor" stages={COMPARE_STAGES} />}
+
+              {comparison && (
+                <section id="gaps" className="animate-rise scroll-mt-8 space-y-4">
+                  <SectionMark index="02" title="Competitor gap analysis" />
+                  <CompareSection you={analysis} comparison={comparison} />
+                </section>
+              )}
+
+              {generating && <StageLoader title="Writing the kit" stages={GENERATE_STAGES} />}
+
+              {assets && (
+                <section id="kit" className="animate-rise scroll-mt-8 space-y-4">
+                  <SectionMark
+                    index={kitIndex}
+                    title="Campaign kit"
+                    action={
+                      <Button variant="ghost" size="sm" onClick={downloadKit}>
+                        <Download data-icon="inline-start" />
+                        Download kit (.md)
+                      </Button>
+                    }
+                  />
+                  <KitDossier
+                    assets={assets}
+                    url={analysis.url}
+                    title={analysis.title}
+                    brief={analysis.brief}
+                    onAssetsChange={setAssets}
+                  />
+                </section>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Whole-kit markdown export ---------- */
+
+function kitMarkdown(
+  analysis: Extract<AnalyzeResponse, { ok: true }>,
+  assets: GenOutput,
+  comparison: Comparison | null,
+): string {
+  const b = analysis.brief;
+  const angle = ANGLES.find((a) => a.key === b.emotionalAngle);
+  const lines: string[] = [
+    `# AdAngle campaign kit — ${analysis.title}`,
+    ``,
+    `${analysis.url}`,
+    `Generated ${new Date().toISOString().slice(0, 10)} · Emotional angle: ${angle?.label ?? b.emotionalAngle}`,
+    ``,
+    `## Persuasion brief`,
+    ``,
+    `- **Offer:** ${b.offer}`,
+    `- **Audience:** ${b.audience}`,
+    `- **Primary hook:** ${b.primaryHook}`,
+    `- **Call to action:** "${b.cta.text}" — ${b.cta.placement}`,
+    ...(b.angleEvidence ? [`- **Angle evidence:** ${b.angleEvidence}`] : []),
+    ``,
+    `### Pain points`,
+    ...b.painPoints.map((p) => `- ${p}`),
+    ``,
+    `### Proof elements`,
+    ...b.proofElements.map((p) => `- ${p}`),
+  ];
+  if (b.weaknesses.length) {
+    lines.push(``, `### Where the pitch leaks`, ...b.weaknesses.map((w) => `- ${w}`));
+  }
+  if (comparison) {
+    const g = comparison.gaps;
+    lines.push(
+      ``,
+      `## Competitor gap analysis — vs ${comparison.competitor.title}`,
+      ``,
+      `### Angle gaps`,
+      ...g.angleGaps.map((x) => `- ${x}`),
+      ``,
+      `### Proof gaps`,
+      ...g.proofGaps.map((x) => `- ${x}`),
+      ``,
+      `### Open positions`,
+      ...g.positioningOpportunities.map((x) => `- ${x}`),
+      ``,
+      `### Counter-angles`,
+      ...g.counterAngles.flatMap((c) => [`- **${c.angle}** — ${c.rationale}`, `  - Hook: "${c.exampleHook}"`]),
+    );
+  }
+  lines.push(
+    ``,
+    `## Google RSA`,
+    ``,
+    `### Headlines (≤${LIMITS.googleRSA.headline} chars)`,
+    ...assets.googleRSA.headlines.map((h) => `- ${h}`),
+    ``,
+    `### Descriptions (≤${LIMITS.googleRSA.description} chars)`,
+    ...assets.googleRSA.descriptions.map((d) => `- ${d}`),
+    ``,
+    `## Meta`,
+    ...assets.meta.flatMap((v, i) => [
+      ``,
+      `### Variant ${i + 1} — ${v.angle}`,
+      `- Primary text: ${v.primaryText}`,
+      `- Headline: ${v.headline}`,
+      `- Description: ${v.description}`,
+    ]),
+    ``,
+    `## TikTok hooks`,
+    ...assets.tiktokHooks.map((h) => `- ${h}`),
+    ``,
+    `## Taboola headlines`,
+    ...assets.taboolaHeadlines.map((h) => `- ${h}`),
+    ``,
+    `## A/B tests`,
+    ...assets.abTests.flatMap((t) => [
+      ``,
+      `### ${t.hypothesis}`,
+      `- Priority: ${t.priority}`,
+      `- A: ${t.variantA}`,
+      `- B: ${t.variantB}`,
+      `- Measure: ${t.metric}`,
+    ]),
+    ``,
+    `## Landing-page fixes`,
+    ...assets.lpFixes.flatMap((f) => [``, `### ${f.problem}`, `- Fix: ${f.fix}`, `- Effort: ${f.effort}`]),
+    ``,
+  );
+  return lines.join("\n");
+}
+
+/* ---------- Quota notice — the expected failure, treated as a state, not an error ---------- */
+
+function QuotaNotice({ error, onLoadSample }: { error: UiError; onLoadSample: () => void }) {
+  return (
+    <Card className="animate-rise mx-auto mt-10 w-full max-w-md gap-0 p-6 text-center" role="status">
+      <Hourglass className="mx-auto size-5 text-primary" aria-hidden />
+      <p className="mt-3 font-display font-stretch-expanded text-sm font-extrabold tracking-wide uppercase">
+        {error.daily ? "Today's readings are spent" : "The instrument needs a minute"}
+      </p>
+      <p className="mt-2 text-sm text-muted-foreground">
+        {error.daily
+          ? "The free AI tier caps requests per day, and this key just hit the ceiling. Nothing is wrong with the page — the quota resets at midnight Pacific."
+          : "The AI provider is rate-limiting right now. Nothing is wrong with the page — give it a minute, then try again."}
+      </p>
+      <Button onClick={onLoadSample} className="mt-5 w-full">
+        <FileText data-icon="inline-start" className="size-4" />
+        View the sample report instead
+      </Button>
+    </Card>
+  );
+}
+
+/* ---------- Scrollspy for the console outline ---------- */
+
+function useScrollSpy(ids: string[]) {
+  const [active, setActive] = useState("");
+  const key = ids.join("|");
+
+  useEffect(() => {
+    if (!key) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const hit = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (hit) setActive(hit.target.id);
+      },
+      { rootMargin: "-10% 0px -75% 0px" },
+    );
+    for (const id of key.split("|")) {
+      const el = document.getElementById(id);
+      if (el) observer.observe(el);
+    }
+    return () => observer.disconnect();
+  }, [key]);
+
+  return active;
+}
+
+/* ---------- The console — instrument rail, always mounted ---------- */
+
+function ConsoleRail({
+  onAnalyze,
+  onLoadSample,
+  analyzing,
+  analysis,
+  assets,
+  comparison,
+  kitIndex,
+  activeId,
+}: {
+  onAnalyze: (u: string) => void;
+  onLoadSample: () => void;
+  analyzing: boolean;
+  analysis: Extract<AnalyzeResponse, { ok: true }> | null;
+  assets: GenOutput | null;
+  comparison: Comparison | null;
+  kitIndex: string;
+  activeId: string;
+}) {
+  return (
+    <aside className="sticky top-0 hidden h-dvh w-80 shrink-0 flex-col border-r bg-sidebar lg:flex">
+      <div className="px-6 pt-6">
+        <Wordmark />
+      </div>
+
+      <form
+        className="mt-7 space-y-2 px-6"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const v = fieldFromForm(e, "url");
+          if (v && !analyzing) onAnalyze(v);
+        }}
+      >
+        <label
+          htmlFor="console-url"
+          className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase"
+        >
+          Page under analysis
+        </label>
+        <Input
+          id="console-url"
+          name="url"
+          key={analysis?.url ?? ""}
+          defaultValue={analysis?.url ?? ""}
+          required
+          placeholder="https://example.com/landing-page"
+          className="bg-card font-mono text-xs"
+        />
+        <Button type="submit" size="sm" className="w-full" disabled={analyzing}>
+          {analyzing ? "Reading…" : analysis ? "Analyze another page" : "Analyze page"}
+        </Button>
+      </form>
+
+      <div className="mt-7 flex flex-col items-center border-y bg-muted/40 px-6 py-6">
+        <div className="w-full max-w-[240px]">
+          <AngleDial active={analysis?.brief.emotionalAngle ?? null} compact hunting={analyzing} />
+        </div>
+        {analysis?.brief.angleEvidence && (
+          <p className="mt-4 w-full border-l-2 border-primary/40 pl-3 text-left text-xs leading-relaxed text-muted-foreground italic [overflow-wrap:anywhere]">
+            {analysis.brief.angleEvidence}
+          </p>
+        )}
+      </div>
+
+      {analysis ? (
+        <nav className="min-h-0 flex-1 overflow-y-auto px-6 py-5" aria-label="Report contents">
+          <p className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase">
+            Dossier
+          </p>
+          <p className="mt-1.5 truncate text-sm font-semibold">{analysis.title}</p>
+          <p className="truncate font-mono text-[11px] text-muted-foreground">{analysis.url}</p>
+
+          <ul className="mt-4 space-y-0.5">
+            <OutlineItem id="brief" mark="01" label="Persuasion brief" activeId={activeId} />
+            {comparison && <OutlineItem id="gaps" mark="02" label="Competitor gaps" activeId={activeId} />}
+            {assets && (
+              <>
+                <OutlineItem id="kit" mark={kitIndex} label="Campaign kit" activeId={activeId} />
+                {KIT_SECTIONS.map((s) => (
+                  <OutlineSubItem
+                    key={s.id}
+                    id={s.id}
+                    label={s.label}
+                    count={s.count(assets)}
+                    activeId={activeId}
+                  />
+                ))}
+              </>
+            )}
+          </ul>
+        </nav>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <p className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase">
+            Dossier
+          </p>
+          <p className="mt-1.5 text-sm text-muted-foreground">
+            {analyzing
+              ? "Reading the page. The brief lands here first."
+              : "Nothing on the desk yet. The report builds here as each reading completes."}
+          </p>
+          <ul className="mt-4 space-y-2">
+            {[
+              { n: "01", copy: "Persuasion brief" },
+              { n: "02", copy: "Competitor gaps" },
+              { n: "03", copy: "Campaign kit" },
+            ].map((s) => (
+              <li key={s.n} className="flex items-baseline gap-2.5 text-sm text-muted-foreground/60">
+                <span className="font-mono text-[10px]">{s.n}</span>
+                {s.copy}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
-    </main>
+
+      <div className="flex items-center justify-between border-t px-6 py-4">
+        <button
+          type="button"
+          onClick={onLoadSample}
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-primary transition-colors hover:text-primary/80 focus-visible:ring-3 focus-visible:ring-ring/50 outline-none"
+        >
+          <FileText className="size-3" />
+          View a sample report
+        </button>
+        <ThemeToggle />
+      </div>
+    </aside>
+  );
+}
+
+function OutlineItem({
+  id,
+  mark,
+  label,
+  activeId,
+}: {
+  id: string;
+  mark: string;
+  label: string;
+  activeId: string;
+}) {
+  const active = activeId === id || (id === "kit" && activeId.startsWith("kit-"));
+  return (
+    <li>
+      <a
+        href={`#${id}`}
+        aria-current={active ? "true" : undefined}
+        className={`flex items-baseline gap-2.5 rounded-md py-1.5 text-sm font-medium transition-colors ${
+          active ? "text-primary" : "text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        <span className="font-mono text-[10px]">{mark}</span>
+        {label}
+      </a>
+    </li>
+  );
+}
+
+function OutlineSubItem({
+  id,
+  label,
+  count,
+  activeId,
+}: {
+  id: string;
+  label: string;
+  count: number;
+  activeId: string;
+}) {
+  const active = activeId === id;
+  return (
+    <li>
+      <a
+        href={`#${id}`}
+        aria-current={active ? "true" : undefined}
+        className={`group flex items-center gap-2 py-1 pl-6 text-[13px] transition-colors ${
+          active ? "text-primary" : "text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        <span
+          aria-hidden
+          className={`h-px shrink-0 transition-all duration-300 ${
+            active ? "w-3.5 bg-primary" : "w-1.5 bg-border group-hover:bg-muted-foreground/60"
+          }`}
+        />
+        {label}
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-muted-foreground/70">{count}</span>
+      </a>
+    </li>
   );
 }
 
@@ -282,7 +715,15 @@ function Wordmark() {
   );
 }
 
-function SectionMark({ index, title }: { index: string; title: string }) {
+function SectionMark({
+  index,
+  title,
+  action,
+}: {
+  index: string;
+  title: string;
+  action?: React.ReactNode;
+}) {
   return (
     <div className="flex items-baseline gap-3">
       <span className="font-mono text-xs font-medium text-primary">{index}</span>
@@ -290,6 +731,7 @@ function SectionMark({ index, title }: { index: string; title: string }) {
         {title}
       </h2>
       <div className="h-px flex-1 self-center bg-border" />
+      {action && <div className="self-center">{action}</div>}
     </div>
   );
 }
@@ -297,14 +739,10 @@ function SectionMark({ index, title }: { index: string; title: string }) {
 /* ---------- Hero ---------- */
 
 function Hero({
-  url,
-  setUrl,
   onAnalyze,
   onLoadSample,
   disabled,
 }: {
-  url: string;
-  setUrl: (v: string) => void;
   onAnalyze: (u: string) => void;
   onLoadSample: () => void;
   disabled: boolean;
@@ -341,20 +779,21 @@ function Hero({
         style={{ animationDelay: "180ms" }}
         onSubmit={(e) => {
           e.preventDefault();
-          if (!disabled) onAnalyze(url);
+          const v = fieldFromForm(e, "url");
+          if (v && !disabled) onAnalyze(v);
         }}
       >
         <Input
           autoFocus
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          name="url"
+          required
           placeholder="https://example.com/landing-page"
           className="h-13 flex-1 rounded-xl border-2 bg-card px-4 font-mono text-sm shadow-xs"
           aria-label="Landing page URL"
         />
         <Button
           type="submit"
-          disabled={disabled || !url.trim()}
+          disabled={disabled}
           className="h-13 rounded-xl px-6 text-base font-semibold"
         >
           Analyze page
@@ -371,10 +810,7 @@ function Hero({
           <button
             key={u}
             type="button"
-            onClick={() => {
-              setUrl(u);
-              onAnalyze(u);
-            }}
+            onClick={() => onAnalyze(u)}
             className="rounded-full border bg-card px-3 py-1 font-mono text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary focus-visible:ring-3 focus-visible:ring-ring/50 outline-none"
           >
             {u.replace(/^https:\/\/(www\.)?/, "")}
@@ -461,7 +897,11 @@ function StageLoader({
 
 /* ---------- Persuasion brief ---------- */
 
-function BriefDossier({ analysis }: { analysis: Extract<AnalyzeResponse, { ok: true }> }) {
+const BriefDossier = memo(function BriefDossier({
+  analysis,
+}: {
+  analysis: Extract<AnalyzeResponse, { ok: true }>;
+}) {
   const b = analysis.brief;
   return (
     <Card className="gap-0 overflow-hidden p-0">
@@ -480,19 +920,23 @@ function BriefDossier({ analysis }: { analysis: Extract<AnalyzeResponse, { ok: t
         </span>
       </div>
 
-      <div className="grid lg:grid-cols-[1fr_310px]">
-        <div className="grid gap-x-6 gap-y-5 p-5 sm:grid-cols-2">
-          <Field label="Offer" value={b.offer} />
-          <Field label="Audience" value={b.audience} />
-          <Field label="Primary hook" value={b.primaryHook} />
-          <Field label="Call to action" value={`“${b.cta.text}” — ${b.cta.placement}`} />
-          <ListField label="Pain points" items={b.painPoints} />
-          <ListField label="Proof elements" items={b.proofElements} />
-        </div>
+      <div className="grid gap-x-6 gap-y-5 p-5 sm:grid-cols-2">
+        <Field label="Offer" value={b.offer} />
+        <Field label="Audience" value={b.audience} />
+        <Field label="Primary hook" value={b.primaryHook} />
+        <Field label="Call to action" value={`“${b.cta.text}” — ${b.cta.placement}`} />
+        <ListField label="Pain points" items={b.painPoints} />
+        <ListField label="Proof elements" items={b.proofElements} />
+      </div>
 
-        <div className="flex flex-col items-center justify-center border-t bg-muted/50 px-6 py-7 lg:border-t-0 lg:border-l">
-          <AngleDial active={b.emotionalAngle} />
-        </div>
+      {/* On desktop the dial lives on the console rail; keep it in the dossier for small screens. */}
+      <div className="flex flex-col items-center border-t bg-muted/50 px-6 py-7 lg:hidden">
+        <AngleDial active={b.emotionalAngle} />
+        {b.angleEvidence && (
+          <p className="mt-4 w-full max-w-[340px] border-l-2 border-primary/40 pl-3 text-left text-xs leading-relaxed text-muted-foreground italic [overflow-wrap:anywhere]">
+            {b.angleEvidence}
+          </p>
+        )}
       </div>
 
       {b.weaknesses.length > 0 && (
@@ -512,7 +956,7 @@ function BriefDossier({ analysis }: { analysis: Extract<AnalyzeResponse, { ok: t
       )}
     </Card>
   );
-}
+});
 
 function Field({ label, value }: { label: string; value: string }) {
   return (
@@ -547,14 +991,10 @@ function ListField({ label, items }: { label: string; items: string[] }) {
 /* ---------- Competitor comparison ---------- */
 
 function CompareBar({
-  value,
-  onChange,
   onCompare,
   disabled,
 }: {
-  value: string;
-  onChange: (v: string) => void;
-  onCompare: () => void;
+  onCompare: (competitorUrl: string) => void;
   disabled: boolean;
 }) {
   return (
@@ -562,7 +1002,8 @@ function CompareBar({
       className="flex flex-col gap-2 rounded-xl border border-dashed bg-card/60 p-3 sm:flex-row sm:items-center"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!disabled) onCompare();
+        const v = fieldFromForm(e, "competitor");
+        if (v && !disabled) onCompare(v);
       }}
     >
       <div className="flex items-center gap-2 text-sm font-medium">
@@ -570,20 +1011,20 @@ function CompareBar({
         <span className="whitespace-nowrap">Compare against a competitor</span>
       </div>
       <Input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
+        name="competitor"
+        required
         placeholder="https://their-landing-page.com"
         className="flex-1 font-mono text-xs"
         aria-label="Competitor landing page URL"
       />
-      <Button type="submit" variant="outline" disabled={disabled || !value.trim()}>
+      <Button type="submit" variant="outline" disabled={disabled}>
         Find the gaps
       </Button>
     </form>
   );
 }
 
-function CompareSection({
+const CompareSection = memo(function CompareSection({
   you,
   comparison,
 }: {
@@ -637,7 +1078,7 @@ function CompareSection({
       </div>
     </div>
   );
-}
+});
 
 function MiniBrief({
   label,
@@ -710,9 +1151,18 @@ function HookLine({ text }: { text: string }) {
 
 /* ---------- The Angle Dial — the instrument the tool is named for ---------- */
 
-function AngleDial({ active }: { active: PageBrief["emotionalAngle"] }) {
-  const activeIndex = ANGLES.findIndex((a) => a.key === active);
-  const targetDeg = 15 + activeIndex * 30;
+function AngleDial({
+  active,
+  compact = false,
+  hunting = false,
+}: {
+  active: PageBrief["emotionalAngle"] | null;
+  compact?: boolean;
+  /** Needle sweeps the dial looking for the angle — the working-phase animation. */
+  hunting?: boolean;
+}) {
+  const activeIndex = active ? ANGLES.findIndex((a) => a.key === active) : -1;
+  const targetDeg = activeIndex >= 0 ? 15 + activeIndex * 30 : 0;
   const [deg, setDeg] = useState(0);
 
   useEffect(() => {
@@ -725,11 +1175,22 @@ function AngleDial({ active }: { active: PageBrief["emotionalAngle"] }) {
     return { x: 100 - r * Math.cos(rad), y: 96 - r * Math.sin(rad) };
   };
 
-  const angleMeta = ANGLES[activeIndex] ?? ANGLES[0];
+  const angleMeta = activeIndex >= 0 ? ANGLES[activeIndex] : null;
 
   return (
-    <figure className="w-full max-w-[290px] text-center">
-      <svg viewBox="-30 -16 260 130" className="w-full" role="img" aria-label={`Detected emotional angle: ${angleMeta.label}`}>
+    <figure className={`w-full text-center ${compact ? "" : "max-w-[290px]"}`}>
+      <svg
+        viewBox="-30 -16 260 130"
+        className="w-full"
+        role="img"
+        aria-label={
+          hunting
+            ? "Angle dial taking a reading"
+            : angleMeta
+              ? `Detected emotional angle: ${angleMeta.label}`
+              : "Angle dial standing by"
+        }
+      >
         <path
           d="M 22 96 A 78 78 0 0 1 178 96"
           fill="none"
@@ -767,34 +1228,84 @@ function AngleDial({ active }: { active: PageBrief["emotionalAngle"] }) {
           );
         })}
         <g
-          className="motion-transition"
-          style={{
-            transform: `rotate(${deg}deg)`,
-            transformOrigin: "100px 96px",
-            transition: "transform 1.1s cubic-bezier(0.34, 1.3, 0.5, 1)",
-          }}
+          className={hunting ? "animate-hunt" : "motion-transition"}
+          style={
+            hunting
+              ? undefined
+              : {
+                  transform: `rotate(${deg}deg)`,
+                  transformOrigin: "100px 96px",
+                  transition: "transform 1.1s cubic-bezier(0.34, 1.3, 0.5, 1)",
+                }
+          }
         >
           <line x1="100" y1="96" x2="40" y2="96" className="stroke-foreground" strokeWidth="2" strokeLinecap="round" />
         </g>
         <circle cx="100" cy="96" r="4.5" className="fill-foreground" />
         <line x1="14" y1="96" x2="186" y2="96" className="stroke-border" strokeWidth="1.5" />
       </svg>
-      <figcaption className="mt-3">
+      <figcaption className={compact ? "mt-2" : "mt-3"}>
         <p className="text-[11px] font-semibold tracking-widest text-muted-foreground uppercase">
           Emotional angle
         </p>
-        <p className="mt-0.5 font-display font-stretch-expanded text-xl font-extrabold uppercase">
-          {angleMeta.label}
-        </p>
-        <p className="text-sm text-muted-foreground">{angleMeta.gloss}</p>
+        {angleMeta ? (
+          <>
+            <p
+              className={`mt-0.5 font-display font-stretch-expanded font-extrabold uppercase ${
+                compact ? "text-lg" : "text-xl"
+              }`}
+            >
+              {angleMeta.label}
+            </p>
+            <p className={`text-muted-foreground ${compact ? "text-xs" : "text-sm"}`}>{angleMeta.gloss}</p>
+          </>
+        ) : (
+          <>
+            <p
+              className={`mt-0.5 font-display font-stretch-expanded font-extrabold uppercase ${
+                hunting ? "text-foreground" : "text-muted-foreground/70"
+              } ${compact ? "text-lg" : "text-xl"}`}
+            >
+              {hunting ? "Reading" : "Standing by"}
+            </p>
+            <p className={`text-muted-foreground ${compact ? "text-xs" : "text-sm"}`}>
+              {hunting ? "Locating the angle" : "Paste a page to take a reading"}
+            </p>
+          </>
+        )}
       </figcaption>
     </figure>
   );
 }
 
-/* ---------- Campaign kit ---------- */
+/* ---------- Campaign kit — one continuous dossier, navigated from the console ---------- */
 
-function AssetTabs({
+const KIT_SECTIONS: {
+  id: string;
+  label: string;
+  count: (a: GenOutput) => number;
+}[] = [
+  { id: "kit-google", label: "Google RSA", count: (a) => a.googleRSA.headlines.length + a.googleRSA.descriptions.length },
+  { id: "kit-meta", label: "Meta", count: (a) => a.meta.length },
+  { id: "kit-tiktok", label: "TikTok", count: (a) => a.tiktokHooks.length },
+  { id: "kit-taboola", label: "Taboola", count: (a) => a.taboolaHeadlines.length },
+  { id: "kit-abtests", label: "A/B tests", count: (a) => a.abTests.length },
+  { id: "kit-fixes", label: "LP fixes", count: (a) => a.lpFixes.length },
+];
+
+function KitHead({ title, hint, right }: { title: string; hint?: string; right?: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-2">
+      <h3 className="font-display font-stretch-expanded text-sm font-extrabold tracking-wide uppercase">
+        {title}
+      </h3>
+      {hint && <span className="font-mono text-xs text-muted-foreground">{hint}</span>}
+      {right && <div className="ml-auto">{right}</div>}
+    </div>
+  );
+}
+
+const KitDossier = memo(function KitDossier({
   assets,
   url,
   title,
@@ -833,31 +1344,10 @@ function AssetTabs({
     URL.revokeObjectURL(a.href);
   }
 
-  const tabs = [
-    { value: "google", label: "Google RSA", count: assets.googleRSA.headlines.length + assets.googleRSA.descriptions.length },
-    { value: "meta", label: "Meta", count: assets.meta.length },
-    { value: "tiktok", label: "TikTok", count: assets.tiktokHooks.length },
-    { value: "taboola", label: "Taboola", count: assets.taboolaHeadlines.length },
-    { value: "abtests", label: "A/B tests", count: assets.abTests.length },
-    { value: "fixes", label: "LP fixes", count: assets.lpFixes.length },
-  ];
-
   return (
-    <Tabs defaultValue="google">
-      <TabsList variant="line" className="h-auto w-full flex-wrap justify-start gap-0 border-b pb-1">
-        {tabs.map((t) => (
-          <TabsTrigger
-            key={t.value}
-            value={t.value}
-            className="flex-none px-3 py-1.5 data-active:text-primary after:bg-primary"
-          >
-            {t.label}
-            <span className="font-mono text-[10px] text-muted-foreground">{t.count}</span>
-          </TabsTrigger>
-        ))}
-      </TabsList>
-
-      <TabsContent value="google" className="space-y-5 pt-3">
+    <div className="space-y-10">
+      <section id="kit-google" className="scroll-mt-8 space-y-5">
+        <KitHead title="Google RSA" />
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-card p-3">
           <p className="text-sm">
             <span className="font-semibold">One paused RSA, ready for bulk upload.</span>{" "}
@@ -884,26 +1374,31 @@ function AssetTabs({
           limit={LIMITS.googleRSA.description}
           rewrite={rewriteCtx("Google RSA description", setDescription)}
         />
-      </TabsContent>
+      </section>
 
-      <TabsContent value="meta" className="space-y-3 pt-3">
-        <div className="flex justify-end">
-          <CopyAllButton
-            text={assets.meta
-              .map((v, i) =>
-                `Variant ${i + 1} — ${v.angle}\nPrimary text: ${v.primaryText}\nHeadline: ${v.headline}\nDescription: ${v.description}`,
-              )
-              .join("\n\n")}
-          />
-        </div>
+      <section id="kit-meta" className="scroll-mt-8 space-y-3 border-t pt-8">
+        <KitHead
+          title="Meta"
+          hint="shown the way they'll run"
+          right={
+            <CopyAllButton
+              text={assets.meta
+                .map((v, i) =>
+                  `Variant ${i + 1} — ${v.angle}\nPrimary text: ${v.primaryText}\nHeadline: ${v.headline}\nDescription: ${v.description}`,
+                )
+                .join("\n\n")}
+            />
+          }
+        />
         <div className="grid gap-4 lg:grid-cols-2">
           {assets.meta.map((v, i) => (
             <MetaVariant key={i} variant={v} index={i} />
           ))}
         </div>
-      </TabsContent>
+      </section>
 
-      <TabsContent value="tiktok" className="pt-3">
+      <section id="kit-tiktok" className="scroll-mt-8 space-y-3 border-t pt-8">
+        <KitHead title="TikTok" />
         <CopyGroup
           title="Spoken hooks"
           hint={`first 3 seconds · ≤ ${LIMITS.tiktok.adText} chars`}
@@ -911,9 +1406,10 @@ function AssetTabs({
           limit={LIMITS.tiktok.adText}
           rewrite={rewriteCtx("TikTok spoken hook", setTiktok)}
         />
-      </TabsContent>
+      </section>
 
-      <TabsContent value="taboola" className="pt-3">
+      <section id="kit-taboola" className="scroll-mt-8 space-y-3 border-t pt-8">
+        <KitHead title="Taboola" />
         <CopyGroup
           title="Native headlines"
           hint={`≤ ${LIMITS.taboola.headline} chars`}
@@ -921,9 +1417,10 @@ function AssetTabs({
           limit={LIMITS.taboola.headline}
           rewrite={rewriteCtx("Taboola native headline", setTaboola)}
         />
-      </TabsContent>
+      </section>
 
-      <TabsContent value="abtests" className="space-y-3 pt-3">
+      <section id="kit-abtests" className="scroll-mt-8 space-y-3 border-t pt-8">
+        <KitHead title="A/B tests" hint="ranked by expected lift" />
         {assets.abTests.map((t, i) => (
           <Card key={i} className="animate-rise gap-0 p-5" style={{ animationDelay: `${i * 60}ms` }}>
             <div className="flex items-start justify-between gap-3">
@@ -942,9 +1439,10 @@ function AssetTabs({
             <p className="mt-3 font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">Measure: {t.metric}</p>
           </Card>
         ))}
-      </TabsContent>
+      </section>
 
-      <TabsContent value="fixes" className="space-y-3 pt-3">
+      <section id="kit-fixes" className="scroll-mt-8 space-y-3 border-t pt-8">
+        <KitHead title="Landing-page fixes" hint="plug the leaks before you buy traffic" />
         {assets.lpFixes.map((f, i) => (
           <Card key={i} className="animate-rise gap-0 p-5" style={{ animationDelay: `${i * 60}ms` }}>
             <div className="flex items-start justify-between gap-3">
@@ -959,10 +1457,10 @@ function AssetTabs({
             <p className="mt-2 text-sm leading-relaxed [overflow-wrap:anywhere]">{f.fix}</p>
           </Card>
         ))}
-      </TabsContent>
-    </Tabs>
+      </section>
+    </div>
   );
-}
+});
 
 function TestArm({ arm, text }: { arm: string; text: string }) {
   return (
@@ -1066,6 +1564,7 @@ function CopyGroup({
             text={it}
             limit={limit}
             delay={i * 40}
+            onEdit={rewrite && ((t: string) => rewrite.onItem(i, t))}
             rewrite={
               rewrite && {
                 kind: rewrite.kind,
@@ -1098,6 +1597,7 @@ function CopyLine({
   muted = false,
   delay = 0,
   rewrite,
+  onEdit,
 }: {
   text: string;
   limit: number;
@@ -1106,13 +1606,30 @@ function CopyLine({
   muted?: boolean;
   delay?: number;
   rewrite?: RewriteLineCtx;
+  /** Enables click-to-edit; called with the committed text. */
+  onEdit?: (newText: string) => void;
 }) {
   const [copied, copy] = useCopied();
   const [tonesOpen, setTonesOpen] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const [rewriteError, setRewriteError] = useState<string | null>(null);
-  const over = text.length > limit;
-  const pct = Math.min(text.length / limit, 1) * 100;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const shown = editing ? draft : text;
+  const over = shown.length > limit;
+  const pct = Math.min(shown.length / limit, 1) * 100;
+
+  function startEdit() {
+    if (!onEdit) return;
+    setDraft(text);
+    setEditing(true);
+  }
+
+  function commitEdit() {
+    setEditing(false);
+    const t = draft.trim();
+    if (onEdit && t && t !== text) onEdit(t);
+  }
 
   async function doRewrite(tone: string) {
     if (!rewrite) return;
@@ -1145,22 +1662,58 @@ function CopyLine({
       style={delay ? { animationDelay: `${delay}ms` } : undefined}
     >
       <div className="flex items-start justify-between gap-2">
-        <p
-          className={`min-w-0 text-sm [overflow-wrap:anywhere] ${emphasize ? "font-semibold" : ""} ${
-            muted ? "text-muted-foreground" : ""
-          }`}
-        >
-          {text}
-        </p>
+        {editing ? (
+          <textarea
+            autoFocus
+            value={draft}
+            rows={Math.max(1, Math.ceil(draft.length / 50))}
+            onFocus={(e) => e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitEdit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                commitEdit();
+              }
+              if (e.key === "Escape") {
+                setDraft(text);
+                setEditing(false);
+              }
+            }}
+            className="min-w-0 flex-1 resize-none bg-transparent text-sm outline-none [field-sizing:content]"
+            aria-label="Edit this line"
+          />
+        ) : (
+          <p
+            onClick={startEdit}
+            title={onEdit ? "Click to edit" : undefined}
+            className={`min-w-0 text-sm [overflow-wrap:anywhere] ${emphasize ? "font-semibold" : ""} ${
+              muted ? "text-muted-foreground" : ""
+            } ${onEdit ? "cursor-text" : ""}`}
+          >
+            {text}
+          </p>
+        )}
         <div className="flex shrink-0 items-center gap-1.5">
           <span
             className={`font-mono text-[11px] tabular-nums ${
               over ? "font-bold text-signal" : "text-muted-foreground"
             }`}
-            title={over ? `${text.length - limit} characters over the limit` : `${limit - text.length} characters to spare`}
+            title={over ? `${shown.length - limit} characters over the limit` : `${limit - shown.length} characters to spare`}
           >
-            {text.length}/{limit}
+            {shown.length}/{limit}
           </span>
+          {onEdit && !editing && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={startEdit}
+              aria-label="Edit this line"
+              className="opacity-40 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            >
+              <Pencil />
+            </Button>
+          )}
           {rewrite && (
             <Button
               variant="ghost"
