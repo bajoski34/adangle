@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Archivo, Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import { THEME_INIT_SCRIPT } from "@/components/theme-toggle";
 import "./globals.css";
 
@@ -41,6 +42,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         {children}
+        <Analytics />
       </body>
     </html>
   );
