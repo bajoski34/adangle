@@ -1,4 +1,4 @@
-import type { PageBrief } from "./schemas";
+import type { BrandProfile, PageBrief } from "./schemas";
 
 // ---------- Analysis ----------
 
@@ -47,6 +47,7 @@ export function rewritePrompt(opts: {
   tone: string;   // e.g. "punchier"
   title: string;
   brief: PageBrief;
+  brandProfile?: BrandProfile;
   seed: number;   // varies the prompt so repeat clicks produce fresh takes
 }): string {
   return `Rewrite one ${opts.kind} in a ${opts.tone} tone.
@@ -54,6 +55,9 @@ export function rewritePrompt(opts: {
 Page: ${opts.title}
 Brief:
 ${JSON.stringify(opts.brief, null, 2)}
+
+Brand constraints:
+${brandBlock(opts.brandProfile)}
 
 Current line: "${opts.text}"
 
@@ -94,12 +98,20 @@ Return JSON with exactly these fields:
 
 export const GENERATE_SYSTEM = `You are a senior performance marketing copywriter who writes ads that convert cold traffic. You write specific, concrete copy — numbers, outcomes, and named pain points beat adjectives. You never write generic marketing filler like "unlock your potential" or "take it to the next level". Every variant you produce tests a distinct angle, not a reworded duplicate. Never include literal line breaks inside JSON string values; use \\n if a line break is needed.`;
 
-export function adCopyPrompt(brief: PageBrief, title: string): string {
+function brandBlock(brand?: BrandProfile) {
+  if (!brand) return "No additional constraints.";
+  return JSON.stringify(brand, null, 2);
+}
+
+export function adCopyPrompt(brief: PageBrief, title: string, brand?: BrandProfile): string {
   return `Using this landing page brief, generate ready-to-ship ad copy.
 
 Page: ${title}
 Brief:
 ${JSON.stringify(brief, null, 2)}
+
+Brand constraints:
+${brandBlock(brand)}
 
 Return JSON with exactly these fields:
 - "googleRSA": { "headlines": 8-15 headlines of MAX 30 characters each, "descriptions": 3-4 descriptions of MAX 90 characters each }. Mix angles: pain-led, outcome-led, proof-led, CTA-led.
@@ -110,14 +122,29 @@ Return JSON with exactly these fields:
 Character limits are hard requirements — count characters before finalizing each line.`;
 }
 
-export function strategyPrompt(brief: PageBrief, title: string): string {
+export function strategyPrompt(brief: PageBrief, title: string, brand?: BrandProfile): string {
   return `Using this landing page brief, generate a testing and optimization plan.
 
 Page: ${title}
 Brief:
 ${JSON.stringify(brief, null, 2)}
 
+Brand constraints:
+${brandBlock(brand)}
+
 Return JSON with exactly these fields:
 - "abTests": 3-5 tests, each { "hypothesis", "variantA", "variantB", "metric", "priority": "high"|"medium"|"low" }. Ground each hypothesis in a specific weakness from the brief.
 - "lpFixes": 3-5 fixes, each { "problem" (from the brief's weaknesses), "fix" (specific, implementable instruction), "effort": "quick win"|"moderate"|"significant" }. Order by expected conversion impact.`;
+}
+
+export function funnelPrompt(steps: Array<{ label: string; url: string; brief: PageBrief }>) {
+  return `You are auditing a conversion funnel across sequential steps. Identify message mismatch and friction between steps.
+
+Steps:
+${JSON.stringify(steps, null, 2)}
+
+Return JSON with exactly:
+- "steps": [{ "label": string, "url": string }]
+- "issues": up to 20 items, each { "step": label, "mismatch": what promise breaks between steps, "friction": specific blocker, "priority": "high"|"medium"|"low" }
+- "summary": concise summary of the biggest leakage points.`;
 }

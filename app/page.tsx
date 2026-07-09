@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ArrowRight, Check, Copy, CopyCheck, Download, FileText, Hourglass, Pencil, RefreshCw, Sparkles, Swords, TriangleAlert } from "lucide-react";
-import type { PageBrief, GenOutput, CompareOutput } from "@/lib/schemas";
+import type { BrandProfile, FunnelAnalysis, GenOutput, CompareOutput, PageBrief, PerformanceSignal } from "@/lib/schemas";
 import { LIMITS, adsEditorRsaCsv } from "@/lib/platforms";
 import { SAMPLE_REPORT } from "@/lib/sample-report";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -15,11 +15,27 @@ import { checkPublicUrl } from "@/lib/url-guard";
 type ApiError = { ok: false; error: string; code?: "quota"; daily?: boolean };
 
 type AnalyzeResponse =
-  | { ok: true; url: string; title: string; source: "firecrawl" | "fallback" | "screenshot"; brief: PageBrief }
+  | { ok: true; url: string; title: string; source: "firecrawl" | "fallback" | "screenshot"; brief: PageBrief; funnel?: FunnelAnalysis }
   | ApiError;
 
 type GenerateResponse = { ok: true; assets: GenOutput } | ApiError;
 type CompareResponse = { ok: true; comparison: CompareOutput } | ApiError;
+type ReportSummary = { id: string; sourceTitle: string; sourceUrl: string; updatedAt: string; source: "firecrawl" | "fallback" | "screenshot"; emotionalAngle: PageBrief["emotionalAngle"] };
+type SavedReport = {
+  id: string;
+  sourceUrl: string;
+  sourceTitle: string;
+  source: "firecrawl" | "fallback" | "screenshot";
+  analysis: PageBrief;
+  assets: GenOutput | null;
+  comparison: CompareOutput | null;
+  competitorUrl: string | null;
+  brandProfile: BrandProfile;
+  watchlist: string[];
+  monitoring: Array<{ at: string; changedCompetitors: string[]; angleShifts: string[]; proofShifts: string[]; notes: string[] }>;
+  performance: PerformanceSignal[];
+  funnel: FunnelAnalysis;
+};
 
 type UiError = { message: string; quota: boolean; daily: boolean };
 
@@ -74,6 +90,13 @@ const COMPARE_STAGES = [
 ];
 
 const SAMPLE_URLS = ["https://stripe.com", "https://linear.app", "https://www.notion.com"];
+const DEFAULT_BRAND_PROFILE: BrandProfile = {
+  tone: "clear, direct, concrete",
+  bannedPhrases: [],
+  requiredProof: [],
+  ctaStyle: "specific, low-friction CTA",
+  readingLevel: "high-school",
+};
 
 export default function Home() {
   const [analyzing, setAnalyzing] = useState(false);
@@ -83,6 +106,13 @@ export default function Home() {
   const [assets, setAssets] = useState<GenOutput | null>(null);
   const [comparing, setComparing] = useState(false);
   const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [brandProfile, setBrandProfile] = useState<BrandProfile>(DEFAULT_BRAND_PROFILE);
+  const [watchlistText, setWatchlistText] = useState("");
+  const [funnelText, setFunnelText] = useState("");
+  const [savedReports, setSavedReports] = useState<ReportSummary[]>([]);
+  const [activeReportId, setActiveReportId] = useState<string | null>(null);
+  const [rerunDiff, setRerunDiff] = useState<{ angleChanged: string | null; proof: { added: string[]; removed: string[] }; weaknesses: { added: string[]; removed: string[] } } | null>(null);
+  const [performanceBoard, setPerformanceBoard] = useState<Array<{ angle: string; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; cpa: number | null }>>([]);
 
   // Deep links: /?url=… re-runs the analysis on load. Server-side caching absorbs
   // repeats, so a shared link doesn't burn quota for a page analyzed recently.
@@ -93,6 +123,10 @@ export default function Home() {
     return () => clearTimeout(t);
   }, []);
 
+  useEffect(() => {
+    void refreshReports();
+  }, []);
+
   // Demo mode: a real, pre-baked report — zero network calls, nothing to rate-limit.
   function loadSample() {
     window.history.replaceState(null, "", window.location.pathname);
@@ -100,6 +134,117 @@ export default function Home() {
     setAnalysis({ ok: true, url: SAMPLE_REPORT.url, title: SAMPLE_REPORT.title, source: SAMPLE_REPORT.source, brief: SAMPLE_REPORT.brief });
     setAssets(SAMPLE_REPORT.assets);
     setComparison(null);
+    setActiveReportId(null);
+    setRerunDiff(null);
+  }
+
+  async function refreshReports() {
+    try {
+      const res = await fetch("/api/reports");
+      const data: { ok: true; reports: ReportSummary[] } | ApiError = await res.json();
+      if (!("ok" in data) || !data.ok) return;
+      setSavedReports(data.reports);
+    } catch {
+      // no-op
+    }
+  }
+
+  async function saveReport() {
+    if (!analysis) return;
+    try {
+      const watchlist = watchlistText
+        .split(/\r?\n|,/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const funnelSteps = funnelText
+        .split(/\r?\n/)
+        .map((line, i) => line.trim())
+        .filter(Boolean)
+        .map((url, i) => ({ label: `Step ${i + 1}`, url }));
+      const res = await fetch("/api/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceUrl: analysis.url,
+          sourceTitle: analysis.title,
+          source: analysis.source,
+          analysis: analysis.brief,
+          assets,
+          comparison: comparison?.gaps ?? null,
+          competitorUrl: comparison?.competitor.url ?? null,
+          brandProfile,
+          watchlist,
+          funnel: { steps: funnelSteps, issues: analysis.funnel?.issues ?? [], summary: analysis.funnel?.summary ?? "" },
+        }),
+      });
+      const data: { ok: true; report: SavedReport } | ApiError = await res.json();
+      if (!data.ok) throw new Error(data.error);
+      setActiveReportId(data.report.id);
+      await refreshReports();
+    } catch (e) {
+      setError(unexpectedError(e, "Could not save report."));
+    }
+  }
+
+  async function loadSavedReport(id: string) {
+    try {
+      const res = await fetch(`/api/reports/${id}`);
+      const data: { ok: true; report: SavedReport } | ApiError = await res.json();
+      if (!data.ok) throw new Error(data.error);
+      const report = data.report;
+      setAnalysis({
+        ok: true,
+        url: report.sourceUrl,
+        title: report.sourceTitle,
+        source: report.source,
+        brief: report.analysis,
+        funnel: report.funnel,
+      });
+      setAssets(report.assets);
+      setComparison(report.comparison && report.competitorUrl ? {
+        competitor: {
+          ok: true,
+          url: report.competitorUrl,
+          title: "Competitor (saved snapshot)",
+          source: "firecrawl",
+          brief: report.analysis,
+          funnel: report.funnel,
+        },
+        gaps: report.comparison,
+      } : null);
+      setBrandProfile(report.brandProfile ?? DEFAULT_BRAND_PROFILE);
+      setWatchlistText((report.watchlist ?? []).join("\n"));
+      setActiveReportId(report.id);
+      setPerformanceBoard([]);
+      setRerunDiff(null);
+      await loadPerformance(report.id);
+    } catch (e) {
+      setError(unexpectedError(e, "Could not load saved report."));
+    }
+  }
+
+  async function rerunSavedReport() {
+    if (!activeReportId) return;
+    try {
+      const res = await fetch(`/api/reports/${activeReportId}/rerun`, { method: "POST" });
+      const data: { ok: true; report: SavedReport; diff: { angleChanged: string | null; proof: { added: string[]; removed: string[] }; weaknesses: { added: string[]; removed: string[] } } } | ApiError = await res.json();
+      if (!data.ok) throw new Error(data.error);
+      setRerunDiff(data.diff);
+      await loadSavedReport(activeReportId);
+      await refreshReports();
+    } catch (e) {
+      setError(unexpectedError(e, "Could not re-run this report."));
+    }
+  }
+
+  async function loadPerformance(id: string) {
+    try {
+      const res = await fetch(`/api/reports/${id}/performance`);
+      const data: { ok: true; leaderboard: Array<{ angle: string; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; cpa: number | null }> } | ApiError = await res.json();
+      if (data.ok) setPerformanceBoard(data.leaderboard);
+    } catch {
+      // no-op
+    }
   }
 
   async function analyze(target: string) {
