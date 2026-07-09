@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
       );
     }
     const funnel = await analyzeFunnel(funnelSteps);
-    return NextResponse.json({ ok: true, ...base, funnel });
+    return NextResponse.json({ ...base, funnel });
   } catch (e) {
     if (e instanceof LLMQuotaError) return quotaResponse(e);
     return NextResponse.json(
